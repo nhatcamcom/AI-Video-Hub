@@ -1,0 +1,45 @@
+# Môi trường & bí mật
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.wheels/
+
+# Dữ liệu cục bộ — không bao giờ commit
+*.db
+*.db-journal
+*.sqlite3
+storage/
+
+# Công cụ kiểm tra
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# E2E (giai đoạn sau)
+node_modules/
+playwright-report/
+test-results/
+
+# IDE / hệ điều hành
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Cấu hình Claude Code cục bộ của từng máy (skill dự án vẫn được commit)
+.claude/settings.local.json

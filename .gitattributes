@@ -1,0 +1,21 @@
+# Chuẩn hóa xuống dòng: LF trong repo cho mọi file text (tránh diff giả do CRLF/LF trên Windows).
+* text=auto eol=lf
+
+# Script chỉ chạy trên Windows cần CRLF
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Nhị phân: không bao giờ chuyển đổi
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.mp4 binary
+*.mov binary
+*.webm binary
+*.db binary
+*.sqlite3 binary
+*.whl binary

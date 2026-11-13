@@ -1,0 +1,109 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-video-hub"
+version = "0.1.0"
+description = "AI Video SaaS: tạo video Text-to-Video / Image-to-Video qua nhà cung cấp AI bên ngoài, tính phí bằng credit trả trước."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "argon2-cffi>=23.1",
+    "email-validator>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "bandit>=1.7",
+    "pip-audit>=2.7",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "--strict-markers",
+    "--cov=app",
+    "--cov-branch",
+    "--cov-report=term-missing",
+    "--cov-fail-under=80",
+]
+markers = [
+    "unit: kiểm thử đơn vị, không I/O",
+    "integration: kiểm thử API + DB",
+    "e2e: kiểm thử trình duyệt (giai đoạn sau)",
+    "slow: kiểm thử chậm",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_also = ["if TYPE_CHECKING:", "if __name__ == .__main__.:"]
+
+# ---------------------------------------------------------------- ruff (lint + format, thay black/isort)
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Skill/tài liệu Claude có code mẫu trong Markdown — không để formatter sửa
+extend-exclude = [".claude"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "N",         # pep8-naming
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "S",         # bandit (bảo mật)
+    "ASYNC",     # lỗi async (I/O chặn trong coroutine)
+    "SIM",       # đơn giản hóa
+    "RUF",       # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+# S101: assert là cách viết test của pytest; S105/S106: mật khẩu mẫu dạng literal chỉ dùng trong test
+"tests/**/*.py" = ["S101", "S105", "S106"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dùng Depends/Query làm giá trị mặc định có chủ đích
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["app", "tests", "migrations"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ---------------------------------------------------------------- bandit
+[tool.bandit]
+exclude_dirs = [".venv", "tests"]
