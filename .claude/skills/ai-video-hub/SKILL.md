@@ -27,7 +27,7 @@ Tổng hợp từ các skill, rule và agent ECC (`affaan-m/ECC` @ `d2ef268`), �
   - `schemas.py` (Pydantic) và `app/core/errors.py`: hợp đồng dữ liệu dùng chung giữa các tầng.
   - Module chỉ gọi module khác qua service của nó, không đụng thẳng vào model của miền khác.
   - Phụ thuộc chỉ đi vào trong (router → service → model). Nếu xuất hiện import vòng tròn thì ranh giới module đang sai.
-- **Tổ chức theo miền**: chia theo `video`, `user`, `auth`, `ai_job`, không chia theo loại file. File thường 200–400 dòng, trần mềm là 800 dòng.
+- **Tổ chức theo miền**: chia theo miền nghiệp vụ, không chia theo loại file. Miền hiện có: `health`, `users`, `auth`, `audit`; Phase 2 thêm `media`, `videos` (xem CLAUDE.md mục 3). File thường 200–400 dòng, trần mềm là 800 dòng.
 - **App factory**: dựng app trong `create_app()`, kèm `lifespan` để đóng pool khi tắt. Đặt CORS và exception handler tại đây. Router mount dưới `/api/v1/...`.
 - **Cấu hình**:
   - Dùng `pydantic-settings` đọc `.env`. Các trường bắt buộc (`database_url`, `secret_key`) không có default, để app dừng ngay khi thiếu.
@@ -35,9 +35,9 @@ Tổng hợp từ các skill, rule và agent ECC (`affaan-m/ECC` @ `d2ef268`), �
 - **Dependency injection**:
   - Session DB và auth luôn lấy qua dependency, không tạo `SessionLocal()` trong handler.
   - Khai báo alias để dùng lại: `DbDep = Annotated[AsyncSession, Depends(get_db)]`, `ActiveUserDep = Annotated[User, Depends(get_current_active_user)]`.
-- **Tác vụ nặng** (xử lý video, gọi AI) không chạy trong request:
-  - Endpoint tạo job rồi trả `202` kèm `job_id`. Client theo dõi tiến độ qua `GET /api/v1/ai-jobs/{job_id}`.
-  - Production cần hàng đợi bền: bảng `jobs` dùng `FOR UPDATE SKIP LOCKED`, hoặc Redis. Không dùng hàng đợi hay bộ đếm trong RAM của từng tiến trình.
+- **Tác vụ nặng** (tạo video, gọi AI) không chạy trong request. Thiết kế đang áp dụng (kế hoạch Phase 2, đã được chủ dự án duyệt):
+  - `POST /api/v1/videos` tạo bản ghi `videos` ở trạng thái `queued` rồi trả `202` + `Location: /api/v1/videos/{video_id}`. Client theo dõi tiến độ qua `GET /api/v1/videos/{video_id}`. **Không** có miền `ai_job`, bảng `jobs` hay endpoint `/api/v1/ai-jobs/...`.
+  - Hàng đợi bền là chính bảng `videos` (cột `status`). Worker ở tiến trình riêng `python -m app.worker` chiếm job bằng `UPDATE … WHERE status='queued'` có điều kiện (PostgreSQL: `FOR UPDATE SKIP LOCKED`). Không chạy worker trong web server; không dùng hàng đợi hay bộ đếm trong RAM của từng tiến trình.
 - **Cache** theo kiểu cache-aside có TTL và xóa khi dữ liệu thay đổi. Chỉ cache phép tính tốn kém và lặp lại.
 - **Log** có cấu trúc (`request_id`, `user_id`, `method`, `path`). Log lỗi kèm stack ở phía server.
 
@@ -121,22 +121,124 @@ Tránh tên mơ hồ như `data`, `tmp`, `x`, `flag`, `handle()`.
   - Giới hạn số upload chạy song song. Script từ CDN có SRI.
 
 ```js
-// static/js/api.js — điểm duy nhất gọi API
+// static/js/api.js — điểm duy nhất gọi API (ES module, cùng origin với API)
+// Hằng số khớp code Phase 1: app/core/config.py (csrf_cookie_name, csrf_header_name)
+// và SAFE_METHODS trong app/modules/auth/dependencies.py
+const CSRF_COOKIE_NAME = "avh_csrf";   // giữ nguyên tên cả khi COOKIE_SECURE=true (không có tiền tố __Host-)
+const CSRF_HEADER_NAME = "X-CSRF-Token";
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const FALLBACK_ERROR_MESSAGE = "Đã có lỗi xảy ra, vui lòng thử lại sau";
+const API_PATH_PREFIX = "/api/v1/";
+// Base giả (TLD .invalid không bao giờ tồn tại): nếu input tự chỉ định authority ("//host", "/\host",
+// tab/xuống dòng chèn giữa…) thì host sau khi parse sẽ khác host này
+const PATH_ONLY_BASE = "http://relative-path.invalid";
+const PATH_ONLY_HOST = new URL(PATH_ONLY_BASE).host;
+
 export class ApiError extends Error {
-  constructor(message, { code, status } = {}) { super(message); this.code = code; this.status = status; }
+  constructor(message, { status, code, details = [], retryAfterSeconds = null, cause } = {}) {
+    super(message, { cause });
+    this.name = "ApiError";
+    this.status = status;                       // 0 = không kết nối được máy chủ
+    this.code = code;                           // error.code của envelope, vd "csrf_failed", "rate_limit_exceeded"
+    this.details = details;                     // [{ field, message, code }] khi 422
+    this.retryAfterSeconds = retryAfterSeconds; // từ header Retry-After (429), null nếu không có
+  }
 }
+
+// Đọc cookie ở MỖI request, không cache, không lưu localStorage: đăng nhập lại sẽ cấp token mới
+function readCsrfToken() {
+  const prefix = `${CSRF_COOKIE_NAME}=`;
+  const entry = document.cookie.split("; ").find((part) => part.startsWith(prefix));
+  return entry === undefined ? null : entry.slice(prefix.length);
+}
+
+function buildHeaders(method, body) {
+  const headers = { Accept: "application/json" };
+  if (body !== undefined && !(body instanceof FormData)) {
+    headers["Content-Type"] = "application/json"; // FormData: để trình duyệt tự đặt boundary
+  }
+  if (!SAFE_METHODS.has(method)) {
+    const csrfToken = readCsrfToken();
+    if (csrfToken !== null) headers[CSRF_HEADER_NAME] = csrfToken; // chỉ qua header, không bao giờ qua URL
+  }
+  return headers;
+}
+
+async function readJsonBody(response) {
+  const contentType = response.headers.get("Content-Type") ?? "";
+  if (response.status === 204 || !contentType.includes("application/json")) return null;
+  return response.json().catch(() => null);
+}
+
+function parseRetryAfterSeconds(response) {
+  const seconds = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
+// Trả URL tuyệt đối đã kiểm tra của một endpoint API cùng origin; ném TypeError cho mọi thứ khác.
+// Kiểm tra trên kết quả của URL parser (chuẩn WHATWG, giống trình duyệt) chứ không trên chuỗi thô,
+// vì parser coi "\" như "/", bỏ tab/xuống dòng, và rút gọn ".." / "%2e%2e" trước khi gửi request.
+function resolveApiUrl(path) {
+  if (typeof path !== "string" || !path.startsWith("/")) {
+    throw new TypeError("apiRequest chỉ nhận đường dẫn /api/v1/..., không nhận URL tuyệt đối");
+  }
+  let pathOnly;
+  let url;
+  try {
+    pathOnly = new URL(path, PATH_ONLY_BASE);
+    url = new URL(path, window.location.origin);
+  } catch (error) {
+    throw new TypeError("Đường dẫn API không hợp lệ", { cause: error });
+  }
+  const isPathOnly = pathOnly.host === PATH_ONLY_HOST;            // chặn "//host", "/\host" kể cả host trùng origin
+  const isSameOrigin = url.origin === window.location.origin;
+  const isApiPath = url.pathname.startsWith(API_PATH_PREFIX);     // pathname đã chuẩn hóa, chặn "/api/v1/../static"
+  if (!isPathOnly || !isSameOrigin || !isApiPath) {
+    throw new TypeError("apiRequest chỉ gọi endpoint cùng origin dưới /api/v1/");
+  }
+  return url;
+}
+
 export async function apiRequest(path, { method = "GET", body, signal } = {}) {
-  const res = await fetch(path, {
-    method, signal, credentials: "same-origin",
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const payload = res.status === 204 ? null : await res.json().catch(() => null);
-  if (!res.ok) throw new ApiError(payload?.error?.message ?? "Đã có lỗi xảy ra",
-                                  { code: payload?.error?.code, status: res.status });
+  // Kiểm tra TRƯỚC khi đọc cookie: CSRF token không bao giờ rời khỏi /api/v1/ cùng origin
+  const url = resolveApiUrl(path);
+  const httpMethod = method.toUpperCase();
+  let response;
+  try {
+    // Gửi đúng URL tuyệt đối đã kiểm tra, không để fetch tự resolve lại theo <base href>
+    response = await fetch(url.href, {
+      method: httpMethod,
+      signal,
+      credentials: "same-origin",
+      headers: buildHeaders(httpMethod, body),
+      body: body === undefined || body instanceof FormData ? body : JSON.stringify(body),
+    });
+  } catch (error) {
+    if (error.name === "AbortError") throw error; // người gọi chủ động hủy, không phải lỗi mạng
+    throw new ApiError("Không kết nối được máy chủ, vui lòng kiểm tra mạng", {
+      status: 0, code: "network_error", cause: error,
+    });
+  }
+  const payload = await readJsonBody(response);
+  if (!response.ok) {
+    const envelope = payload?.error; // {"error": {"code", "message", "details"?}} — app/core/errors.py
+    throw new ApiError(envelope?.message ?? FALLBACK_ERROR_MESSAGE, {
+      status: response.status,
+      code: envelope?.code ?? "unexpected_response", // vd 502 HTML từ proxy, không có envelope
+      details: envelope?.details ?? [],
+      retryAfterSeconds: parseRetryAfterSeconds(response),
+    });
+  }
   return payload;
 }
 ```
+
+Ghi chú cho ví dụ trên (theo code Phase 1, ưu tiên code nếu có khác biệt):
+- Server kiểm tra CSRF cho mọi method **ngoài** `GET`/`HEAD`/`OPTIONS`, và chỉ khi request có cookie phiên: giá trị header `X-CSRF-Token` được so với hash lưu trong session. Gửi header cho `POST /auth/login` hay `/auth/register` khi chưa đăng nhập là vô hại. Nếu cookie `avh_csrf` không có, request vẫn được gửi để server trả `403 csrf_failed` thay vì client tự chặn.
+- `apiRequest` chỉ nhận đường dẫn dạng `/api/v1/...` (có thể kèm query string) và luôn kiểm tra bằng URL parser trước khi gắn CSRF token. Nó từ chối (`TypeError`, không gọi `fetch`): URL tuyệt đối, đường dẫn protocol-relative (`//host/...`, kể cả khi host trùng origin), backslash làm đổi authority (`/\host/...`, `\\host/...`), tab/xuống dòng chèn vào đường dẫn, đường dẫn ngoài API (`/static/...`, `/api/v10/...`) và đường dẫn thoát khỏi `/api/v1/` bằng `..` hoặc `%2e%2e`. Không thay bước này bằng `startsWith("/")`: `"/\evil.com/..."` vượt qua kiểm tra chuỗi nhưng trình duyệt sẽ gửi tới `evil.com`.
+- `403` với `code === "csrf_failed"` thường do phiên đã đổi (đăng nhập ở tab khác): giao diện báo người dùng tải lại trang hoặc đăng nhập lại, không tự gửi lại request.
+- Cookie `avh_csrf` cố ý không `HttpOnly` để JS đọc được; vì vậy chống XSS (CSP chặt, `textContent`) là điều kiện để token này an toàn. Cookie phiên vẫn `HttpOnly`, JS không đọc được.
+- Thông điệp người dùng lấy theo `error.code` (vd `rate_limit_exceeded` kèm `retryAfterSeconds`); `error.message` của server chỉ là phương án dự phòng.
 
 - **SEO và hiệu năng** cho trang công khai:
   - LCP < 2.5s, INP < 200ms, CLS < 0.1.
@@ -234,8 +336,9 @@ def register_exception_handlers(app: FastAPI) -> None:
 ## 5. API Design
 
 - **URL**:
-  - Danh từ số nhiều, `kebab-case`, có version: `/api/v1/videos`, `/api/v1/videos/{video_id}/ai-jobs`.
+  - Danh từ số nhiều, `kebab-case`, có version: `/api/v1/videos`, `/api/v1/videos/{video_id}/view-stats`.
   - Hành động không phải CRUD dùng POST: `POST /api/v1/videos/{video_id}/transcribe` (trả 202).
+  - Hai đường dẫn `view-stats` và `transcribe` ở trên **chỉ minh họa quy tắc đặt tên**, không phải endpoint đang có hay đã lên kế hoạch. Danh sách endpoint thật nằm trong OpenAPI và kế hoạch của từng giai đoạn.
   - Không đặt động từ trong URL (`/getVideos` là sai).
 - **Method**: GET để đọc, POST để tạo, PATCH để cập nhật một phần, PUT để thay toàn bộ, DELETE để xóa.
 - **Status code**:
@@ -391,7 +494,12 @@ ECC không có skill debugging riêng. Quy trình dưới đây ghép từ `tdd-
 - **Xác thực (Auth)**:
   - Mật khẩu hash bằng bcrypt/argon2.
   - JWT kiểm tra chữ ký, `exp`, danh sách `algorithms` cố định, và issuer/audience nếu dùng. Ép kiểu `sub` cẩn thận.
-  - Token trên web lưu trong cookie `HttpOnly; Secure; SameSite=Strict`, **không dùng localStorage**.
+  - Dự án dùng **session phía server**, không dùng JWT (dòng JWT ở trên chỉ áp dụng nếu sau này có). Thiết lập thực tế (`app/modules/auth/cookies.py`, `app/core/config.py`):
+    - Mọi cookie auth đặt `SameSite=Lax` (**không phải Strict**: người dùng mở link từ email vẫn giữ đăng nhập; chống CSRF do token CSRF gắn với session đảm nhận), `Path=/`.
+    - Cookie phiên `avh_session` và cookie thiết bị quen `avh_device`: `HttpOnly`.
+    - Cookie CSRF `avh_csrf`: **không** `HttpOnly`, có chủ đích, để JS của chính site đọc và gửi header `X-CSRF-Token`.
+    - `Secure` theo `COOKIE_SECURE` (dev mặc định `false` vì chạy http; staging/production bắt buộc `true`). Khi `Secure`, cookie phiên và thiết bị đổi tên thành `__Host-avh_session` / `__Host-avh_device`; cookie CSRF giữ tên `avh_csrf`.
+    - Không lưu token trong `localStorage`. Không đổi các thiết lập này nếu chưa được duyệt.
 - **Phân quyền**: mọi route không công khai phải có dependency xác thực. Kiểm tra quyền sở hữu tài nguyên. Phân biệt 401 và 403.
 - **Lộ dữ liệu**:
   - Luôn có `response_model`. Không trả hash, token hay đường dẫn nội bộ. Lỗi trả ra ngoài phải chung chung.
@@ -408,36 +516,54 @@ ECC không có skill debugging riêng. Quy trình dưới đây ghép từ `tdd-
   - `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy`.
   - Bắt buộc HTTPS, tắt debug.
 - **Dependency**: chạy `pip-audit`, commit lock file.
-- **Upload video**:
-  - Thư mục lưu trữ nằm ngoài `static/` và mã nguồn, có trong `.gitignore`.
-  - Video phục vụ qua endpoint có kiểm tra quyền.
-  - `content_type` do client gửi nên có thể giả mạo; xác minh lại bằng ffprobe và giới hạn thời lượng, độ phân giải.
+- **Upload file** (quy tắc thống nhất với CLAUDE.md mục 7 và kế hoạch P2-4):
+  - Định dạng xác định bằng **magic bytes** theo whitelist (Phase 2: PNG, JPEG, WebP). **Không tin** `content_type` và tên/phần mở rộng do client gửi; không dùng chúng để quyết định bất cứ điều gì.
+  - Tên file ngẫu nhiên và **phần mở rộng do server đặt** theo định dạng đã xác định. Khi phục vụ lại file dùng content type server đã lưu, kèm `nosniff`.
+  - Đếm byte thực đọc được, dừng ngay khi vượt giới hạn (413); không tin `Content-Length`.
+  - Thư mục lưu trữ nằm ngoài `static/` và mã nguồn, có trong `.gitignore`. File phục vụ qua endpoint có kiểm tra quyền.
+  - Magic bytes là điều kiện cần, chưa đủ để chứng minh file hợp lệ: ảnh còn phải được loại bỏ metadata EXIF/GPS trước khi lưu lâu dài (kế hoạch 7.8). Nếu sau này nhận upload video thì xác minh thêm bằng ffprobe và giới hạn thời lượng, độ phân giải.
+
+Ví dụ rút gọn bước nhận file vào **file tạm** (code thật còn loại bỏ metadata, giữ chỗ hạn mức rồi mới chuyển file vào vị trí lưu lâu dài — kế hoạch Phase 2 mục 4.1; ghi đĩa nên chạy qua thread pool để không chặn event loop):
 
 ```python
-ALLOWED_VIDEO_TYPES = {"video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov"}
 CHUNK_SIZE_BYTES = 1024 * 1024
+SNIFF_SIZE_BYTES = 12   # đủ cho chữ ký PNG (8), JPEG (3), WebP (RIFF....WEBP = 12)
 
-async def save_upload(file: UploadFile) -> str:
-    extension = ALLOWED_VIDEO_TYPES.get(file.content_type or "")
-    if extension is None or Path(file.filename or "").suffix.lower() != extension:   # whitelist MIME + đuôi
-        raise AppError("Định dạng video không được hỗ trợ", "unsupported_media_type", 415)
-    upload_root = Path(settings.upload_dir).resolve()
-    destination = (upload_root / f"{secrets.token_hex(16)}{extension}").resolve()    # tên do server sinh
-    if not destination.is_relative_to(upload_root):                                   # chống path traversal
+def detect_image_type(head: bytes) -> tuple[str, str] | None:
+    """Trả (content_type, phần mở rộng) theo magic bytes; None nếu không thuộc whitelist."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    return None
+
+async def receive_image_upload(file: UploadFile, temp_dir: Path, max_bytes: int) -> tuple[Path, str, int]:
+    head = await file.read(SNIFF_SIZE_BYTES)
+    detected = detect_image_type(head)              # KHÔNG đọc file.content_type hay file.filename
+    if detected is None:
+        raise AppError("Định dạng ảnh không được hỗ trợ", "unsupported_media_type", 415)
+    content_type, extension = detected
+    root = temp_dir.resolve()
+    destination = (root / f"{secrets.token_hex(16)}{extension}").resolve()   # tên + đuôi do server đặt
+    if not destination.is_relative_to(root):                                  # chống path traversal
         raise AppError("Đường dẫn không hợp lệ", "invalid_path", 400)
-    upload_root.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
     written = 0
     try:
         with destination.open("wb") as out:
-            while chunk := await file.read(CHUNK_SIZE_BYTES):
+            chunk = head
+            while chunk:
                 written += len(chunk)
-                if written > settings.max_upload_size_bytes:                         # giới hạn khi đang đọc
+                if written > max_bytes:                 # đếm byte thật, không tin Content-Length
                     raise AppError("File quá lớn", "payload_too_large", 413)
                 out.write(chunk)
-    except Exception:
-        destination.unlink(missing_ok=True)                                           # không để lại file dở
+                chunk = await file.read(CHUNK_SIZE_BYTES)
+    except BaseException:
+        destination.unlink(missing_ok=True)             # không để lại file dở, kể cả khi bị hủy
         raise
-    return destination.name
+    return destination, content_type, written
 ```
 
 **Lệnh quét** (khi được cho phép chạy):

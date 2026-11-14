@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import Settings, get_settings
+from app.core.config import AppEnvironment, Settings, get_settings
 from app.core.database import create_engine, create_session_factory
 from app.core.email import create_email_sender
 from app.core.errors import register_exception_handlers
@@ -22,8 +22,16 @@ from app.modules.auth.router import router as auth_router
 from app.modules.auth.security import prepare_password_hashing
 from app.modules.health.router import router as health_router
 from app.modules.users.router import router as users_router
+from app.web.router import mount_static_files
+from app.web.router import router as web_router
+from app.web.security_headers import SecureHeadersFastAPI, SecurityHeadersPolicy
 
 API_V1_PREFIX = "/api/v1"
+DOCS_ENVIRONMENT: AppEnvironment = "development"
+DOCS_URL = "/docs"
+REDOC_URL = "/redoc"
+SWAGGER_OAUTH2_REDIRECT_URL = "/docs/oauth2-redirect"
+OPENAPI_URL = "/openapi.json"
 CORS_ALLOWED_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
 CORS_BASE_HEADERS = ["Authorization", "Content-Type"]
 
@@ -51,16 +59,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await engine.dispose()  # đóng pool kết nối khi tắt app
 
-    # Ẩn tài liệu API trên production để không lộ bề mặt tấn công
-    docs_enabled = not app_settings.is_production
-    app = FastAPI(
+    # Tài liệu API (/docs, /redoc, /docs/oauth2-redirect, /openapi.json) CHỈ bật ở development;
+    # test, staging, production trả 404 và không áp dụng ngoại lệ CSP của trang docs
+    docs_enabled = app_settings.app_env == DOCS_ENVIRONMENT
+    docs_pages = frozenset({DOCS_URL, REDOC_URL, SWAGGER_OAUTH2_REDIRECT_URL})
+    app = SecureHeadersFastAPI(
+        security_headers_policy=SecurityHeadersPolicy(
+            is_hsts_enabled=app_settings.cookie_secure,  # cookie Secure ⇔ chạy sau HTTPS
+            docs_paths=docs_pages if docs_enabled else frozenset(),
+        ),
         title=app_settings.app_name,
         version=app_settings.app_version,
         debug=app_settings.debug,
         lifespan=lifespan,
-        docs_url="/docs" if docs_enabled else None,
-        redoc_url="/redoc" if docs_enabled else None,
-        openapi_url="/openapi.json" if docs_enabled else None,
+        docs_url=DOCS_URL if docs_enabled else None,
+        redoc_url=REDOC_URL if docs_enabled else None,
+        swagger_ui_oauth2_redirect_url=SWAGGER_OAUTH2_REDIRECT_URL,
+        openapi_url=OPENAPI_URL if docs_enabled else None,
     )
     app.state.settings = app_settings
     app.state.engine = engine
@@ -79,4 +94,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router, prefix=API_V1_PREFIX)
     app.include_router(auth_router, prefix=API_V1_PREFIX)
     app.include_router(users_router, prefix=API_V1_PREFIX)
+    app.include_router(web_router)
+    mount_static_files(app)
     return app

@@ -11,10 +11,24 @@ pytestmark = pytest.mark.integration
 ALLOWED_ORIGIN = "http://localhost:8000"
 
 
-async def test_openapi_docs_available_outside_production(client: AsyncClient) -> None:
-    assert (await client.get("/docs")).status_code == 200
-    schema = (await client.get("/openapi.json")).json()
+async def test_openapi_docs_available_only_in_development() -> None:
+    app = create_app(build_settings(app_env="development"))
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            docs_status = (await client.get("/docs")).status_code
+            schema = (await client.get("/openapi.json")).json()
+    finally:
+        await app.state.engine.dispose()
+
+    assert docs_status == 200
     assert "/api/v1/health" in schema["paths"]
+
+
+async def test_openapi_docs_disabled_in_test_environment(client: AsyncClient) -> None:
+    assert (await client.get("/docs")).status_code == 404
+    assert (await client.get("/openapi.json")).status_code == 404
 
 
 async def test_openapi_docs_disabled_in_production() -> None:

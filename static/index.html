@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Video Hub — Tạo video từ văn bản và hình ảnh (bản demo)</title>
+    <meta name="description" content="AI Video Hub: tạo video từ văn bản hoặc hình ảnh, theo dõi tiến độ và quản lý thư viện video. Phiên bản hiện tại là bản demo dùng MockProvider.">
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/css/tokens.css">
+    <link rel="stylesheet" href="/static/css/base.css">
+    <script type="module" src="/static/js/home.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Bỏ qua tới nội dung chính</a>
+
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="brand" href="/">AI Video Hub</a>
+        <span class="badge badge--demo">Bản demo</span>
+      </div>
+    </header>
+
+    <main id="main-content" class="page" tabindex="-1">
+      <div class="page__header">
+        <h1 class="page__title">Tạo và quản lý video AI</h1>
+        <p class="page__lead">
+          Đây là bản demo: mọi video được tạo bởi MockProvider, chưa kết nối nhà cung cấp AI thật.
+        </p>
+      </div>
+
+      <section class="panel" aria-labelledby="server-status-heading">
+        <h2 id="server-status-heading" class="panel__title">Trạng thái máy chủ</h2>
+        <div id="server-status" class="status" data-state="loading">
+          <span class="status__icon" aria-hidden="true"></span>
+          <p id="server-status-text" class="status__text" role="status" aria-live="polite" tabindex="-1">
+            Đang kiểm tra kết nối máy chủ…
+          </p>
+        </div>
+        <button id="server-status-retry" class="button" type="button" hidden>Kiểm tra lại</button>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,263 @@
+/* Nền tảng chung: reset nhẹ, chữ, layout khung, nút, huy hiệu, vùng trạng thái.
+   Mọi màu / khoảng cách lấy từ tokens.css. Không có style inline (CSP style-src 'self'). */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-body);
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  line-height: var(--line-height-tight);
+  text-wrap: balance;
+}
+
+p {
+  margin: 0;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* ---------------------------------------------------------------- focus */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Đích của "Bỏ qua tới nội dung chính": nhận focus bằng script/anchor, không cần vòng focus */
+[tabindex="-1"]:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.skip-link {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: 10;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-accent);
+  font-weight: var(--font-weight-medium);
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: none;
+}
+
+/* ---------------------------------------------------------------- header */
+.site-header {
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.site-header__inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: var(--content-max-width);
+  min-height: 3.5rem;
+  margin: 0 auto;
+  padding: var(--space-2) var(--space-4);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch-target-min);
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-bold);
+  text-decoration: none;
+}
+
+.brand:hover {
+  color: var(--color-accent);
+}
+
+/* ---------------------------------------------------------------- huy hiệu */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+}
+
+.badge--demo {
+  background: var(--color-demo-bg);
+  color: var(--color-demo-text);
+}
+
+/* ---------------------------------------------------------------- nội dung */
+.page {
+  display: grid;
+  gap: var(--space-5);
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-4) var(--space-7);
+}
+
+.page__header {
+  display: grid;
+  gap: var(--space-2);
+  max-width: 48rem;
+}
+
+.page__title {
+  font-size: var(--font-size-2xl);
+}
+
+.page__lead {
+  color: var(--color-text-muted);
+}
+
+.panel {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 40rem;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.panel__title {
+  font-size: var(--font-size-lg);
+}
+
+/* ---------------------------------------------------------------- nút */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: start;
+  min-width: var(--touch-target-min);
+  min-height: var(--touch-target-min);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font: inherit;
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition: background-color var(--duration-exit) var(--easing-standard);
+}
+
+.button:hover {
+  background: var(--color-accent-hover);
+}
+
+/* ---------------------------------------------------------------- vùng trạng thái */
+.status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--color-info-bg);
+  color: var(--color-info-text);
+}
+
+.status[data-state="success"] {
+  background: var(--color-success-bg);
+  color: var(--color-success-text);
+}
+
+.status[data-state="error"] {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-text);
+}
+
+/* Icon chỉ để trang trí (aria-hidden): ý nghĩa luôn nằm trong chữ bên cạnh.
+   Mỗi trạng thái có HÌNH khác nhau (vòng xoay / dấu tích / dấu chấm than), không chỉ khác màu. */
+.status__icon {
+  position: relative;
+  flex: none;
+  width: var(--status-icon-size);
+  height: var(--status-icon-size);
+  margin-top: 0.125rem;
+  border: 2px solid var(--color-info-icon);
+  border-radius: 50%;
+}
+
+.status[data-state="loading"] .status__icon {
+  border-right-color: transparent;
+  animation: status-spin var(--duration-spin) linear infinite;
+}
+
+.status[data-state="success"] .status__icon {
+  border-color: var(--color-success-icon);
+}
+
+.status[data-state="success"] .status__icon::after {
+  content: "";
+  position: absolute;
+  top: 18%;
+  left: 32%;
+  width: 28%;
+  height: 50%;
+  border: solid var(--color-success-icon);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.status[data-state="error"] .status__icon {
+  border-color: var(--color-danger-icon);
+}
+
+.status[data-state="error"] .status__icon::after {
+  content: "!";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--color-danger-icon);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-bold);
+  line-height: 1;
+}
+
+.status__text {
+  overflow-wrap: anywhere;
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status[data-state="loading"] .status__icon {
+    animation: none;
+  }
+
+  .button {
+    transition: none;
+  }
+}

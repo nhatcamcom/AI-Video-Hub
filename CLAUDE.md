@@ -23,7 +23,7 @@ Hướng dẫn bắt buộc cho Claude Code khi làm việc trong dự án này.
   - Băm/kiểm tra mật khẩu từ code async chỉ qua `hash_password_async` / `verify_password_async` (thread pool giới hạn RAM Argon2), không gọi `asyncio.to_thread` trực tiếp.
   - Mọi thao tác quản trị nhạy cảm (đổi quyền, sau này là credit) phải ghi `AuditService.record()` **trong cùng transaction** với thay đổi, và không ghi email hay secret vào audit hoặc log.
 - **Chạy server:** luôn dùng `python -m app.server` (tắt `proxy_headers` của uvicorn). Việc tin header proxy chỉ do `TRUSTED_PROXY_IPS` quyết định. Không hướng dẫn chạy `uvicorn` trực tiếp mà thiếu `--no-proxy-headers`.
-- **Chạy worker:** `python -m app.worker`, là **tiến trình riêng**, khởi động và dừng độc lập với web server. Không chạy worker bên trong tiến trình web server (không khởi động trong `lifespan` hay background task của `create_app()`). Server và worker chỉ trao đổi qua database (bảng job) và thư mục lưu trữ; server vẫn chạy được khi không có worker.
+- **Chạy worker (dự kiến từ P2-7, chưa có code):** `python -m app.worker`, là **tiến trình riêng**, khởi động và dừng độc lập với web server. Không chạy worker bên trong tiến trình web server (không khởi động trong `lifespan` hay background task của `create_app()`). Server và worker chỉ trao đổi qua database (bảng job) và thư mục lưu trữ; server vẫn chạy được khi không có worker.
 - **Engine database** luôn tạo qua `create_engine()` (app) hoặc `create_migration_engine()` (Alembic). Cả hai bật `hide_parameters=True`, nên lỗi SQL không làm lộ email, hash hay token vào log.
 
 ## Skill dự án `ai-video-hub` (đọc đầu tiên)
@@ -89,46 +89,82 @@ Skill **chưa cài** thì không đọc được ở phiên sau. Phải cài ch�
 
 ## 3. Cấu trúc thư mục chuẩn
 
-Modular Monolith, theo `fastapi-patterns` và `rules/python/fastapi.md`. Cấu trúc dưới đây là **cấu trúc thực tế từ giai đoạn 0**. Giữ nguyên cấu trúc hiện có; muốn đổi thì đề xuất trước, không tự ý di chuyển.
+Modular Monolith, theo `fastapi-patterns` và `rules/python/fastapi.md`. Mục này tách **3.1 cấu trúc hiện có** (đã có trong repo, đối chiếu ngày 2026-11-14) và **3.2 cấu trúc dự kiến** (chưa tạo). Giữ nguyên cấu trúc hiện có; muốn đổi thì đề xuất trước, không tự ý di chuyển. Không coi mục trong 3.2 là đã tồn tại; khi một task tạo ra thư mục/file thì chuyển nó sang 3.1.
+
+### 3.1 Cấu trúc hiện có (sau Phase 1 và P2-1)
 
 ```text
 AI Video Hub/
 ├── app/
 │   ├── main.py            # create_app(): factory, lifespan, CORS, exception handler, router
+│   ├── server.py          # python -m app.server: cách khởi động chuẩn (tắt proxy headers của uvicorn)
+│   ├── cli.py             # python -m app.cli promote-admin | cleanup-auth
+│   ├── model_registry.py  # nạp mọi model cho Alembic; model mới phải thêm vào đây
 │   ├── core/              # hạ tầng dùng chung — KHÔNG chứa nghiệp vụ
 │   │   ├── config.py      # Settings (pydantic-settings, đọc .env), get_settings()
 │   │   ├── database.py    # engine async, session factory, Base, get_db, DbDep
-│   │   ├── dependencies.py# SettingsDep (và get_current_user… ở giai đoạn sau)
-│   │   └── errors.py      # AppError + lớp con + handler + schema ErrorResponse
-│   ├── worker.py          # `python -m app.worker` (từ giai đoạn 2): chỉ là entrypoint mỏng (vòng lặp, tín hiệu dừng, log);
-│   │                      #   nghiệp vụ job nằm trong service của miền (app/modules/videos/)
-│   └── modules/           # mỗi miền nghiệp vụ một thư mục (health, auth, videos, credits…)
-│       └── <miền>/
+│   │   ├── dependencies.py# SettingsDep, ClientIpDep, RateLimiterDep, EmailSenderDep, RateLimitSubjectDep
+│   │   ├── errors.py      # AppError + lớp con + handler + schema ErrorResponse
+│   │   ├── client_ip.py   # IP thật của client (trusted proxy), khóa rate limit IPv4 / IPv6 /64 + /48
+│   │   ├── rate_limit.py  # rate limiter in-memory, sức chứa riêng từng rule
+│   │   ├── email.py       # adapter EmailSender (file / memory / disabled)
+│   │   └── time.py        # utc_now()
+│   ├── web/               # P2-1 · giao diện cùng origin, KHÔNG chứa nghiệp vụ
+│   │   ├── router.py      # GET / (static/index.html) + mount /static (StaticFiles, chặn path traversal)
+│   │   └── security_headers.py  # CSP + header bảo mật cho MỌI response; bọc NGOÀI middleware stack
+│   │                      #   (SecureHeadersFastAPI) để cả response 500 cũng có header
+│   └── modules/           # mỗi miền nghiệp vụ một thư mục: health, users, auth, audit
+│       └── <miền>/        # chỉ có file mà miền cần (health không có models.py, audit không có router.py),
+│           │              #   có thể thêm file riêng (vd. auth: cookies.py, dependencies.py, throttle.py)
 │           ├── router.py  # router mỏng: nhận request, gọi service, trả response_model
 │           ├── schemas.py # Pydantic: XxxCreate / XxxUpdate / XxxResponse tách riêng
 │           ├── service.py # nghiệp vụ và transaction
 │           └── models.py  # SQLAlchemy ORM models của miền
-├── static/
-│   ├── css/               # tokens.css (biến CSS), base.css, theo từng trang/khối
-│   ├── js/                # Module ES theo tính năng; api.js gom các lệnh fetch
-│   └── images/
-├── templates/             # HTML (Jinja2 nếu render phía server)
+├── static/                # P2-1 · HTML/CSS/JS thuần, không build step, không script/style inline (CSP)
+│   ├── index.html         # trang khung
+│   ├── css/               # tokens.css (biến thiết kế) · base.css
+│   └── js/                # api.js (điểm DUY NHẤT gọi API, chỉ /api/v1/ cùng origin) · home.js
 ├── migrations/            # Alembic async (env.py đọc DATABASE_URL từ Settings); alembic.ini CHỈ ASCII
-│   └── versions/          # mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
+│   └── versions/          # 0001–0003; mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
 ├── tests/
-│   ├── conftest.py
+│   ├── conftest.py · helpers.py
 │   ├── unit/
-│   ├── integration/       # Test API + DB
-│   └── e2e/               # Playwright (luồng quan trọng)
+│   └── integration/       # Test API + DB
+├── docs/plans/            # kế hoạch từng giai đoạn
+├── reports/               # báo cáo smoke test
+├── .claude/skills/ai-video-hub/  # skill dự án
 ├── .env.example           # Biến môi trường mẫu, KHÔNG có giá trị thật
-├── pyproject.toml
+├── alembic.ini · pyproject.toml · requirements-lock.txt
+├── README.md
 └── CLAUDE.md
 ```
 
+Thư mục runtime cục bộ, đã git-ignore và không phải mã nguồn: `.venv/`, `storage/` (hiện chỉ có `storage/dev-outbox/` của email dev), `backups/`, file `*.db`.
+
+### 3.2 Cấu trúc dự kiến (chưa tạo, theo kế hoạch Phase 2)
+
+```text
+app/
+├── worker.py              # P2-7 · python -m app.worker: entrypoint mỏng (vòng lặp, tín hiệu dừng, log)
+├── core/storage.py        # P2-3 · LocalStorage: khóa do server sinh, chống path traversal
+└── modules/
+    ├── media/             # P2-4 · ảnh đầu vào
+    └── videos/            # P2-6 · yêu cầu tạo video, hàng đợi (bảng videos), service job cho worker
+        └── providers/     # P2-5/P2-7 · VideoProvider + MockProvider
+static/*.html, static/js/*.js  # P2-2 trở đi · các trang và module JS theo tính năng (login, create, library…)
+storage/uploads/, storage/videos/  # P2-3 trở đi · file của user, ngoài static/ và mã nguồn, đã git-ignore
+tests/e2e/                 # chỉ khi chủ dự án đồng ý cài Playwright (P2-13)
+templates/                 # TÙY CHỌN, xem ghi chú bên dưới
+```
+
+- **Worker:** theo cùng mẫu với `app/server.py` và `app/cli.py`: `app/worker.py` sẽ là module chạy được bằng `python -m app.worker`, giữ mỏng; logic chiếm job, gọi provider, cập nhật trạng thái nằm trong service của miền `videos`. Nếu sau này entrypoint lớn quá một file thì đổi thành package `app/worker/` có `__main__.py`, lệnh chạy giữ nguyên. Không đặt worker ở thư mục gốc dự án.
+- **`templates/` là tùy chọn**, chỉ dùng khi sau này thật sự cần render HTML phía server (Jinja2, giữ autoescape). Phase 2 (kể cả P2-1) dùng **HTML tĩnh** trong `static/`, không dùng Jinja2. Không cài Jinja2 và không tạo thư mục `templates/` khi chưa có task cần đến.
+
+### 3.3 Quy tắc
+
 - Tổ chức theo tính năng/miền (video, user, auth…), mỗi miền có router, schema, model, service riêng. Module chỉ gọi module khác qua service công khai của nó, không truy cập thẳng vào model của miền khác.
 - App được dựng bằng factory `create_app()` và khởi động qua `python -m app.server`. Không tạo `app` ở mức module, để việc import không đọc cấu hình.
-- Worker theo cùng mẫu với `app/server.py` và `app/cli.py`: `app/worker.py` là module chạy được bằng `python -m app.worker`, giữ mỏng; logic chiếm job, gọi provider, cập nhật trạng thái nằm trong service của miền `videos`. Nếu sau này entrypoint lớn quá một file thì đổi thành package `app/worker/` có `__main__.py`, lệnh chạy giữ nguyên. Không đặt worker ở thư mục gốc dự án.
-- File video người dùng tải lên lưu **ngoài** `static/` và ngoài thư mục mã nguồn (ví dụ `storage/uploads/`, cấu hình qua `config`), và nằm trong `.gitignore`.
+- File người dùng tải lên và file video kết quả lưu **ngoài** `static/` và ngoài thư mục mã nguồn (ví dụ `storage/uploads/`, cấu hình qua `config`), và nằm trong `.gitignore`.
 
 ## 4. Quy tắc đặt tên
 
@@ -221,7 +257,9 @@ Chuẩn xử lý lỗi:
 - Không gọi `fetch`/`httpx` tới URL do người dùng cung cấp nếu chưa kiểm tra theo whitelist (chống SSRF). Gọi HTTP ra ngoài luôn phải đặt timeout.
 
 **Upload video và file**
-- Kiểm tra kích thước, MIME type **và** phần mở rộng theo whitelist. Đặt tên file ngẫu nhiên phía server, không dùng tên người dùng gửi.
+- Định dạng file xác định bằng **magic bytes** (chữ ký đầu file) theo whitelist. **Không tin** `content_type` và tên/phần mở rộng do client gửi.
+- Tên file ngẫu nhiên và **phần mở rộng do server đặt** theo định dạng đã xác định; khi phục vụ lại file dùng content type server đã lưu kèm `nosniff`.
+- Kích thước đo bằng số byte thực đọc được, dừng ngay khi vượt giới hạn; không tin `Content-Length` hay kích thước client khai báo.
 - Chống path traversal: không ghép trực tiếp đường dẫn từ input. Resolve đường dẫn rồi kiểm tra nó vẫn nằm trong thư mục lưu trữ.
 - Không truyền input người dùng vào lệnh shell (ví dụ khi gọi ffmpeg thì dùng danh sách tham số, không dùng `shell=True`).
 

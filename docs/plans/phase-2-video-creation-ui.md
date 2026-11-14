@@ -68,7 +68,7 @@ storage/                    # đã git-ignore: uploads/, videos/, posters/
 | Method | Đường dẫn | Kết quả |
 |---|---|---|
 | GET | `/video-models` | Danh sách model đã cấu hình (Phase 2: chỉ `mock`, gắn nhãn demo) kèm tỷ lệ và thời lượng hỗ trợ |
-| POST | `/media/images` | Multipart upload ảnh → `201` + `Location`; `413` quá 10 MB (đếm byte thật khi đọc); `415` sai định dạng (kiểm tra magic bytes, không tin `content_type`); `409 storage_quota_exceeded`; `429` |
+| POST | `/media/images` | Multipart upload ảnh → `201` + `Location`; `413` quá 10 MB (đếm byte thật khi đọc); `415` sai định dạng (xác định bằng magic bytes; không tin `content_type` hay tên/đuôi file client gửi); `409 storage_quota_exceeded`; `429` |
 | GET | `/media/images/{id}` | Ảnh của chính mình; của người khác → `404` (không lộ tồn tại) |
 | POST | `/videos` | JSON `{prompt, aspect_ratio, duration_seconds, model_key, input_image_id?}` → `202` + `Location`; `422` khi tổ hợp không được model hỗ trợ; `409` khi vượt số job đang chạy cho phép; `429` |
 | GET | `/videos?cursor=&limit=&status=` | Thư viện của mình, cursor pagination, `limit ≤ 50` |
@@ -89,7 +89,7 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 | P2-1 | Khung web: phục vụ `static/`, layout chung, `tokens.css`, `api.js`, middleware header bảo mật | Xem chi tiết ở 6.1 |
 | P2-2 | Trang đăng nhập / đăng ký / quên & đặt lại mật khẩu (UI cho API Phase 1) | Dùng đúng API hiện có, gửi `X-CSRF-Token`; hiển thị lỗi `429` có thời gian chờ; a11y (label, focus, aria-live) |
 | P2-3 | `core/storage.py` (LocalStorage) + cấu hình giới hạn + hạn mức 1 GB/user (4.1) | Khóa ngẫu nhiên do server sinh; test chống path traversal; thư mục ngoài `static/` và đã git-ignore; giữ chỗ hạn mức nguyên tử, test nhiều upload đồng thời không vượt 1.073.741.824 byte |
-| P2-4 | Upload ảnh + `media_assets` + `user_storage_usage` + migration 0004; cài `python-multipart`; **xem xét Pillow** để loại bỏ metadata (7.8) — mọi dependency kiểm tra tương thích trước khi cài | Whitelist PNG/JPEG/WebP theo magic bytes; đếm byte thật, dừng ở 10 MB; 409/413/415/429; không tin kích thước client khai báo; **file lưu lâu dài không còn EXIF/GPS** (test bằng ảnh mẫu có EXIF/GPS cho cả JPEG, PNG, WebP); ảnh người khác → 404; migration up/down sạch |
+| P2-4 | Upload ảnh + `media_assets` + `user_storage_usage` + migration 0004; cài `python-multipart`; **xem xét Pillow** để loại bỏ metadata (7.8) — mọi dependency kiểm tra tương thích trước khi cài | Định dạng xác định **chỉ bằng magic bytes** (whitelist PNG/JPEG/WebP); `content_type` và tên/đuôi file client gửi bị bỏ qua (test: file PNG gửi kèm `content_type=image/jpeg` và tên `x.exe` vẫn được lưu là PNG; file HTML gửi kèm `content_type=image/png` → 415); tên file và đuôi do server đặt theo định dạng đã xác định; phục vụ lại bằng content type đã lưu + `nosniff`; đếm byte thật, dừng ở 10 MB; 409/413/415/429; không tin kích thước client khai báo; **file lưu lâu dài không còn EXIF/GPS** (test bằng ảnh mẫu có EXIF/GPS cho cả JPEG, PNG, WebP); ảnh người khác → 404; migration up/down sạch |
 | P2-5 | Registry model + `GET /video-models` | Chỉ trả model bật trong cấu hình; Mock gắn nhãn demo; test |
 | P2-6 | `videos` + migration 0005 + `POST /videos` | Validate tỷ lệ/thời lượng theo khả năng của model; ảnh đầu vào phải thuộc người tạo; giới hạn job đang chạy mỗi user; `202` + `Location`; hạn mức tạo theo user (dùng lại `AccountThrottle`) |
 | P2-7 | Worker + MockProvider (`python -m app.worker`, tiến trình riêng) | Hai worker không lấy trùng job (test đồng thời); job kẹt ở `processing` khi worker chết được xử lý lại theo thời hạn; chuyển trạng thái đúng; đường dẫn file mẫu cấu hình được, thiếu file mẫu → `failed` + thông báo rõ (test dùng file giả, không cần MP4 thật); lỗi provider → `failed` + `error_code` an toàn; không gọi API AI thật; server chạy được khi không có worker và ngược lại |
@@ -112,7 +112,7 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 - `app/web/`: mount `StaticFiles` cho `/static`, route trả trang khung tại `/`; không dùng Jinja2.
 - `static/js/api.js`: hàm gọi API duy nhất (`credentials: "same-origin"`, tự gửi `X-CSRF-Token` lấy từ cookie CSRF hiện có cho POST/PATCH/PUT/DELETE, ánh xạ envelope `{"error": {...}}` thành lỗi có `code`/`status`).
 - Middleware header bảo mật cho **mọi** response (API và static): `Content-Security-Policy` (`default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'`), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` tắt camera/micro/vị trí; `Strict-Transport-Security` chỉ khi `COOKIE_SECURE=true` (HTTPS).
-- Ngoại lệ có kiểm soát cho `/docs` và `/redoc` ở môi trường dev (Swagger UI cần script CDN và inline); production đã tắt docs nên không cần ngoại lệ.
+- Ngoại lệ CSP có kiểm soát cho `/docs`, `/redoc`, `/docs/oauth2-redirect` (Swagger UI / ReDoc cần script CDN và inline), chỉ khi docs đang bật. Docs (gồm cả `/openapi.json`) **chỉ bật ở `development`**; `test`, `staging`, `production` trả `404` và không có ngoại lệ CSP nào (quyết định 7.9).
 - Test và cập nhật README phần chạy giao diện.
 
 **Ngoài phạm vi P2-1:** trang đăng nhập/đăng ký (P2-2), lưu trữ và hạn mức (P2-3), upload và `python-multipart` (P2-4), model, video, worker (P2-5 trở đi), mọi migration DB, mọi dependency mới.
@@ -122,7 +122,7 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 2. Mọi response (kể cả `GET /api/v1/health`, lỗi 404, lỗi 401) có đủ header bảo mật trên; CSP không chứa `unsafe-inline` hay `unsafe-eval`; HSTS chỉ có khi `COOKIE_SECURE=true`.
 3. Path traversal qua `/static` (vd. `/static/../app/main.py`, dạng mã hóa `%2e%2e`) trả `404`; không truy cập được `storage/`, `.env` hay mã nguồn qua đường dẫn tĩnh.
 4. Route `/api/v1/*` không bị static che; mọi test hiện có vẫn pass.
-5. `/docs` vẫn dùng được ở dev; production vẫn trả `404` cho `/docs`.
+5. `/docs`, `/redoc`, `/docs/oauth2-redirect`, `/openapi.json` dùng được ở `development`; ở `test`, `staging`, `production` cả bốn trả `404` với CSP chặt (không có ngoại lệ docs).
 6. Trang khung không có script hay style inline; không dùng `innerHTML`; có một `<h1>`, landmark `header`/`main`, focus nhìn thấy được.
 7. ruff, mypy strict, pytest (coverage ≥ 80%), bandit, pip-audit đều đạt; có bằng chứng RED → GREEN.
 
@@ -138,10 +138,11 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 6. **Mã lỗi vượt hạn mức lưu trữ:** `409 storage_quota_exceeded` (envelope `{"error": {"code": "storage_quota_exceeded", ...}}`). Worker dùng cùng mã làm `error_code` khi job thất bại vì hết hạn mức.
 7. **Xóa video và hạn mức:** chỉ giải phóng hạn mức sau khi đã xác nhận xóa file thành công. Nếu xóa file thất bại thì giữ lại thông tin dung lượng và đưa vào quy trình cleanup/đối soát. Chi tiết ở 4.1.
 8. **Metadata ảnh:** ảnh upload phải được loại bỏ metadata EXIF/GPS **trước khi lưu trữ lâu dài** hoặc cung cấp cho bất kỳ ai khác ngoài người tải lên (kể cả gửi cho nhà cung cấp AI ở Phase 4). File gốc chỉ tồn tại dưới dạng file tạm trong lúc xử lý upload. Cách loại bỏ (Pillow hay cách khác) được quyết định ở P2-4.
+9. **Tài liệu API theo môi trường (xác nhận khi nghiệm thu P2-1):** `/docs`, `/redoc`, `/docs/oauth2-redirect` và `/openapi.json` **chỉ bật khi `APP_ENV=development`**. Môi trường `test`, `staging`, `production` đều trả `404` cho cả bốn đường dẫn và không áp dụng ngoại lệ CSP của trang docs. Điều kiện dựa trên trường `app_env` có sẵn của `Settings`, không thêm cơ chế nhận diện môi trường mới.
 
 ## 8. Rủi ro và lưu ý bảo mật
 
-- Upload là bề mặt tấn công mới: kiểm tra magic bytes, giới hạn kích thước khi đọc, tên file do server sinh, phục vụ qua endpoint có kiểm tra quyền (không qua `static/`), `nosniff`.
+- Upload là bề mặt tấn công mới: định dạng xác định bằng magic bytes (không tin `content_type`/tên file client), giới hạn kích thước khi đọc, tên file và đuôi do server đặt, phục vụ qua endpoint có kiểm tra quyền (không qua `static/`), `nosniff`.
 - Serving HTML lần đầu → bắt buộc CSP và các header bảo mật (đã ghi nhận chưa có ở Phase 1).
 - IDOR: mọi truy vấn lọc theo `owner_id`; test truy cập chéo tài khoản.
 - Endpoint cần đăng nhập vẫn chưa có rate limit chung — Phase 2 thêm hạn mức cho upload và tạo video theo user.
@@ -153,4 +154,4 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 - **Hạn mức lưu trữ:** sai lệch `used_bytes` nếu tiến trình chết giữa lúc giữ chỗ và ghi file, hoặc giữa lúc xóa file và cập nhật DB → cần bước đối soát định kỳ; file tạm của upload dở dang phải được dọn. Xóa file thất bại kéo dài (file bị khóa trên Windows, quyền thư mục) làm user bị tính dung lượng cho video đã xóa cho tới khi cleanup thành công — cần log cảnh báo (không ghi đường dẫn tuyệt đối hay dữ liệu cá nhân).
 - **Đĩa đầy toàn hệ thống** không được hạn mức theo user bảo vệ (nhiều user × 1 GB): cần theo dõi dung lượng đĩa khi triển khai thật.
 - **Rule rate limit IP mới** cho upload/tạo video phải có tên riêng và được thêm vào `AUTH_CAPACITY_SHARES` (quy ước CLAUDE.md); hiện tổng tỉ trọng đã là 100, nên cần chia lại.
-- **CSP và Swagger UI:** `/docs` cần script ngoài và inline; ngoại lệ chỉ áp dụng cho `/docs`, `/redoc` ở dev, không được nới CSP cho toàn app.
+- **CSP và Swagger UI:** `/docs` cần script ngoài và inline; ngoại lệ chỉ áp dụng cho đúng `/docs`, `/redoc`, `/docs/oauth2-redirect` khi `APP_ENV=development`, không được nới CSP cho toàn app. Trang docs phụ thuộc CDN bên ngoài (jsdelivr, Google Fonts) nên cần internet khi xem.
