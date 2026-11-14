@@ -40,20 +40,20 @@ storage/                    # đã git-ignore: uploads/, videos/, posters/
 - **MockProvider:** chuyển trạng thái `queued → processing → succeeded/failed` với tiến độ giả lập, sao chép file MP4 mẫu do chủ dự án cung cấp (quyết định 7.3) làm kết quả; đường dẫn file mẫu lấy từ cấu hình (tên đề xuất `MOCK_SAMPLE_VIDEO_PATH`). Thiếu file mẫu → job `failed` với `error_code` rõ ràng (vd. `mock_sample_missing`); không tự tải hay tự tạo video mẫu. Test tự động dùng file giả trong `tmp_path`, không cần file MP4 thật. Có thể cấu hình để thất bại có chủ đích (kiểm thử UI lỗi).
 - **Poster (ảnh đại diện) là tùy chọn trong Phase 2:** chưa có ffmpeg để trích khung hình từ video, nên MockProvider không sinh poster; giao diện hiển thị placeholder và `GET /videos/{id}/poster` trả `404` khi không có.
 
-## 4. Mô hình dữ liệu (migration mới, không sửa 0001–0003)
+## 4. Mô hình dữ liệu (migration mới, không sửa 0001–0004)
 
-**`media_assets`** (migration 0004): `id`, `owner_id` FK users ON DELETE CASCADE (index), `storage_key` (unique, do server sinh), `content_type` (CHECK trong whitelist), `size_bytes` (số byte **thực ghi xuống đĩa**, tức là sau khi đã loại bỏ metadata), `width`, `height` (nullable — điền khi cách xử lý ảnh chọn ở P2-4 đọc được kích thước), `sha256`, `created_at`, `deleted_at` (nullable). Index `(owner_id, created_at)`.
+**`media_assets`** (migration 0005, P2-4): `id`, `owner_id` FK users ON DELETE CASCADE (index), `storage_key` (unique, do server sinh), `content_type` (CHECK trong whitelist), `size_bytes` (số byte **thực ghi xuống đĩa**, tức là sau khi đã loại bỏ metadata), `width`, `height` (nullable — điền khi cách xử lý ảnh chọn ở P2-4 đọc được kích thước), `sha256`, `created_at`, `deleted_at` (nullable). Index `(owner_id, created_at)`.
 
-**`user_storage_usage`** (migration 0004): `user_id` PK + FK users ON DELETE CASCADE, `used_bytes` BigInteger NOT NULL default 0 (CHECK `used_bytes >= 0`), `updated_at`. Một hàng mỗi user, là nguồn duy nhất để kiểm tra hạn mức (xem 4.1).
+**`user_storage_usage`** (migration 0004, đã làm ở P2-3): `user_id` PK + FK users ON DELETE CASCADE, `used_bytes` BigInteger NOT NULL default 0 (CHECK `used_bytes >= 0`), `updated_at`. Một hàng mỗi user, là nguồn duy nhất để kiểm tra hạn mức (xem 4.1).
 
-**`videos`** (migration 0005): `id`, `owner_id` FK CASCADE, `prompt` Text (giới hạn độ dài ở schema), `input_image_id` FK media_assets SET NULL (nullable, index), `aspect_ratio` (CHECK `16:9`/`9:16`/`1:1`), `duration_seconds` (CHECK trong tập cho phép), `model_key`, `status` (CHECK `queued/processing/succeeded/failed`), `progress` 0–100, `error_code` (nullable, mã an toàn để hiển thị), `output_storage_key`, `output_size_bytes` (nullable), `poster_storage_key` (nullable), `poster_size_bytes` (nullable), `created_at`, `started_at`, `finished_at`, `deleted_at`. Index `(owner_id, created_at)` cho thư viện, `(status, created_at)` cho worker.
+**`videos`** (migration 0006, P2-6): `id`, `owner_id` FK CASCADE, `prompt` Text (giới hạn độ dài ở schema), `input_image_id` FK media_assets SET NULL (nullable, index), `aspect_ratio` (CHECK `16:9`/`9:16`/`1:1`), `duration_seconds` (CHECK trong tập cho phép), `model_key`, `status` (CHECK `queued/processing/succeeded/failed`), `progress` 0–100, `error_code` (nullable, mã an toàn để hiển thị), `output_storage_key`, `output_size_bytes` (nullable), `poster_storage_key` (nullable), `poster_size_bytes` (nullable), `created_at`, `started_at`, `finished_at`, `deleted_at`. Index `(owner_id, created_at)` cho thư viện, `(status, created_at)` cho worker.
 
 ### 4.1 Hạn mức lưu trữ (quyết định 7.5)
 
 - **Hạn mức:** 1 GB/user = **1.073.741.824 byte**, đặt trong config (`STORAGE_QUOTA_BYTES_PER_USER`), kiểm tra **ở backend**; frontend chỉ hiển thị.
 - **Tính vào dung lượng của user:** mọi file server lưu thay cho user — ảnh đầu vào đã upload (bản đã loại bỏ metadata), file video kết quả (kể cả bản sao do MockProvider tạo), poster nếu có. Tính theo **số byte thực ghi xuống đĩa**, không theo `Content-Length` hay kích thước client khai báo.
 - **Không tính:** dữ liệu trong database, file tạm của upload đang diễn ra (đã bị giới hạn 10 MB mỗi upload), file mẫu của MockProvider trong `storage/` (thuộc hệ thống).
-- **Chống vượt hạn mức khi upload đồng thời:** sau khi ghi xong file tạm và biết số byte thật, giữ chỗ bằng **một câu `UPDATE` có điều kiện** trên `user_storage_usage` (`used_bytes + :size <= :quota`) — cùng mẫu nguyên tử đã dùng cho `AccountThrottle` ở Phase 1. Thành công thì chuyển file vào vị trí chính và ghi bản ghi trong cùng transaction; thất bại thì xóa file tạm và trả **`409 storage_quota_exceeded`** (quyết định 7.6). Lỗi giữa chừng sau khi đã giữ chỗ thì hoàn lại số byte (compensating update) và xóa file.
+- **Chống vượt hạn mức khi upload đồng thời:** sau khi ghi xong file tạm và biết số byte thật, giữ chỗ bằng **một câu `UPDATE` có điều kiện** trên `user_storage_usage` (`used_bytes + :size <= :quota`) — cùng mẫu nguyên tử đã dùng cho `AccountThrottle` ở Phase 1. Giữ chỗ tự commit một transaction ngắn; việc chuyển file vào vị trí chính và ghi bản ghi diễn ra SAU đó, không giữ transaction trong lúc làm I/O file (chi tiết ở 6.3). Không đủ chỗ thì xóa file tạm và trả **`409 storage_quota_exceeded`** (quyết định 7.6). Lỗi giữa chừng sau khi đã giữ chỗ thì hoàn lại số byte (compensating update) và xóa file.
 - **Video kết quả:** worker giữ chỗ theo kích thước file thật trước khi ghi nhận kết quả; không đủ chỗ → job `failed` với `error_code=storage_quota_exceeded`, xóa file kết quả. `POST /videos` từ chối sớm khi user đã dùng hết hạn mức.
 - **Giải phóng (quyết định 7.7):** hạn mức **chỉ được giải phóng sau khi đã xác nhận xóa file thành công**.
   - `DELETE /videos/{id}` đặt `deleted_at` (video biến mất khỏi thư viện ngay), sau đó thử xóa từng file (video kết quả, poster).
@@ -88,10 +88,10 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 | P2-0 | Chốt quyết định mục 7, ghi ADR (hàng đợi DB + worker, frontend không build step) | Quyết định đã chốt; README và CLAUDE.md đã đồng bộ (2026-11-14). **Còn lại:** ADR trong `docs/adr/` |
 | P2-1 | Khung web: phục vụ `static/`, layout chung, `tokens.css`, `api.js`, middleware header bảo mật | Xem chi tiết ở 6.1 |
 | P2-2 | Trang đăng nhập / đăng ký / quên & đặt lại mật khẩu (UI cho API Phase 1) | Xem chi tiết ở 6.2 |
-| P2-3 | `core/storage.py` (LocalStorage) + cấu hình giới hạn + hạn mức 1 GB/user (4.1) | Khóa ngẫu nhiên do server sinh; test chống path traversal; thư mục ngoài `static/` và đã git-ignore; giữ chỗ hạn mức nguyên tử, test nhiều upload đồng thời không vượt 1.073.741.824 byte |
-| P2-4 | Upload ảnh + `media_assets` + `user_storage_usage` + migration 0004; cài `python-multipart`; **xem xét Pillow** để loại bỏ metadata (7.8) — mọi dependency kiểm tra tương thích trước khi cài | Định dạng xác định **chỉ bằng magic bytes** (whitelist PNG/JPEG/WebP); `content_type` và tên/đuôi file client gửi bị bỏ qua (test: file PNG gửi kèm `content_type=image/jpeg` và tên `x.exe` vẫn được lưu là PNG; file HTML gửi kèm `content_type=image/png` → 415); tên file và đuôi do server đặt theo định dạng đã xác định; phục vụ lại bằng content type đã lưu + `nosniff`; đếm byte thật, dừng ở 10 MB; 409/413/415/429; không tin kích thước client khai báo; **file lưu lâu dài không còn EXIF/GPS** (test bằng ảnh mẫu có EXIF/GPS cho cả JPEG, PNG, WebP); ảnh người khác → 404; migration up/down sạch |
+| P2-3 | `core/storage.py` (LocalStorage) + `storage_root` / hạn mức 1 GB/user (4.1) + `user_storage_usage` + migration 0004 | Xem chi tiết ở 6.3 |
+| P2-4 | Upload ảnh + `media_assets` + migration 0005 (giới hạn ảnh 10 MiB = 10.485.760 byte); dùng `LocalStorage` và `StorageQuotaService` của P2-3; cài `python-multipart`; **xem xét Pillow** để loại bỏ metadata (7.8) — mọi dependency kiểm tra tương thích trước khi cài | Định dạng xác định **chỉ bằng magic bytes** (whitelist PNG/JPEG/WebP); `content_type` và tên/đuôi file client gửi bị bỏ qua (test: file PNG gửi kèm `content_type=image/jpeg` và tên `x.exe` vẫn được lưu là PNG; file HTML gửi kèm `content_type=image/png` → 415); tên file và đuôi do server đặt theo định dạng đã xác định; phục vụ lại bằng content type đã lưu + `nosniff`; đếm byte thật, dừng ở 10 MB; 409/413/415/429; không tin kích thước client khai báo; **file lưu lâu dài không còn EXIF/GPS** (test bằng ảnh mẫu có EXIF/GPS cho cả JPEG, PNG, WebP); ảnh người khác → 404; migration up/down sạch |
 | P2-5 | Registry model + `GET /video-models` | Chỉ trả model bật trong cấu hình; Mock gắn nhãn demo; test |
-| P2-6 | `videos` + migration 0005 + `POST /videos` | Validate tỷ lệ/thời lượng theo khả năng của model; ảnh đầu vào phải thuộc người tạo; giới hạn job đang chạy mỗi user; `202` + `Location`; hạn mức tạo theo user (dùng lại `AccountThrottle`) |
+| P2-6 | `videos` + migration 0006 + `POST /videos` | Validate tỷ lệ/thời lượng theo khả năng của model; ảnh đầu vào phải thuộc người tạo; giới hạn job đang chạy mỗi user; `202` + `Location`; hạn mức tạo theo user (dùng lại `AccountThrottle`) |
 | P2-7 | Worker + MockProvider (`python -m app.worker`, tiến trình riêng) | Hai worker không lấy trùng job (test đồng thời); job kẹt ở `processing` khi worker chết được xử lý lại theo thời hạn; chuyển trạng thái đúng; đường dẫn file mẫu cấu hình được, thiếu file mẫu → `failed` + thông báo rõ (test dùng file giả, không cần MP4 thật); lỗi provider → `failed` + `error_code` an toàn; không gọi API AI thật; server chạy được khi không có worker và ngược lại |
 | P2-8 | API đọc: list (cursor), detail, content (Range, download), poster, delete + lệnh cleanup/đối soát lưu trữ | Chỉ chủ sở hữu; cursor ổn định; Range trả `206`; test IDOR; xóa file thành công → `used_bytes` giảm đúng; xóa file thất bại → `used_bytes` không đổi và cleanup xử lý lại được; đối soát sửa được sai lệch |
 | P2-9 | UI Dashboard | Video gần đây, nút tạo mới; đủ trạng thái loading/empty/error |
@@ -154,6 +154,31 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 7. Đặt lại mật khẩu: token đọc từ fragment, xóa khỏi URL ngay (kể cả khi mở link lúc đang ở chính trang — `hashchange`), không lưu storage, không gọi API khi thiếu token hợp lệ; thành công → mọi phiên bị thu hồi, header về chưa đăng nhập; dùng lại token → báo hết hạn + link yêu cầu mới.
 8. Kiểm thử trình duyệt ở 390x844 và 1440x900: không vi phạm CSP, không lỗi JS (lỗi mạng chỉ là phản hồi 4xx của `/api/v1`), vùng chạm ≥ 44px, focus nhìn thấy được.
 9. pytest (coverage ≥ 80%), ruff, mypy, bandit, pip-audit đạt; có bằng chứng RED → GREEN; DB chính không đổi.
+
+### 6.3 Chi tiết P2-3 — Lưu trữ file và hạn mức (đã duyệt 2026-11-14)
+
+**Quyết định của chủ dự án:**
+1. Bảng `user_storage_usage` và migration `0004` chuyển sang P2-3; `media_assets` là `0005` (P2-4), `videos` là `0006` (P2-6).
+2. Được sửa `app/core/config.py`, tạo `app/core/storage.py`, sửa `app/model_registry.py`, thêm module quota và migration.
+3. Module hạn mức: `app/modules/quota/`.
+4. `STORAGE_ROOT` mặc định `storage`, gồm `uploads/`, `videos/`, `posters/`, `tmp/`; `dev-outbox/` không bị ảnh hưởng.
+5. Giới hạn ảnh ở P2-4 là 10 MiB = 10.485.760 byte; P2-3 chỉ thêm `storage_root` và `storage_quota_bytes_per_user`.
+6. Chưa thêm API xem dung lượng (để P2-9/P2-10).
+7. `release` vượt số dư: không đưa về 0; UPDATE có điều kiện `used_bytes >= n`, không đủ thì giữ nguyên, ghi cảnh báo, trả kết quả không thành công để đối soát.
+8. Hàm dọn file tạm quá hạn (mặc định 1 giờ) ở P2-3; CLI `cleanup-storage` ở P2-8.
+
+**Đã xây (nền móng cho P2-4, P2-7, P2-8 — chưa có endpoint, chưa có giao diện):**
+- `Settings.storage_root` / `storage_root_path`: đường dẫn tương đối tính từ thư mục dự án, resolve (cả symlink/junction) trước khi so sánh; từ chối thư mục nằm trong, trùng hoặc bao trùm `static/` / `app/`; không tạo thư mục khi đọc cấu hình. `storage_quota_bytes_per_user` > 0, mặc định 1.073.741.824.
+- `app/core/storage.py` — `LocalStorage`: khóa `<kind>/<32 hex><đuôi>` sinh bằng `secrets` (kind/đuôi theo danh sách cho phép); `path_for` kiểm tra regex rồi kiểm tra đường dẫn sau resolve (chặn `..`, `\`, đường dẫn tuyệt đối, byte null, `tmp/`, `dev-outbox/`, symlink/junction thoát ra ngoài); `write_temp_file` → `commit_temp_file` (`os.replace` trong cùng thư mục gốc) / `discard_temp_file`; `delete` trả `DELETED` / `NOT_FOUND` / `FAILED`; `remove_stale_temp_files` chỉ xóa file thường quá hạn ngay trong `tmp/`, không theo liên kết. Mọi I/O đĩa qua `asyncio.to_thread`.
+- `app/modules/quota/` — `UserStorageUsage` (migration `0004`) và `StorageQuotaService`: `reserve` (UPDATE có điều kiện `used_bytes + n <= quota`, kiểm `rowcount`, tạo hàng đầu tiên an toàn khi hai request cùng chèn), `release` (quyết định 7), `usage`, `set_used` (chỉ cho đối soát). Mỗi thao tác tự commit một transaction ngắn; `409 storage_quota_exceeded`.
+
+**Luồng ghi file dùng ở P2-4/P2-7** (không giữ transaction trong lúc làm I/O file):
+1. `write_temp_file` (không transaction) → biết số byte thật.
+2. `reserve` (transaction ngắn, tự commit) → không đủ chỗ: `discard_temp_file`, trả `409`.
+3. `commit_temp_file` (không transaction) → lỗi: `release` + `discard_temp_file`.
+4. Ghi bản ghi (`media_assets`/`videos`) trong transaction ngắn riêng → lỗi: xóa file + `release`.
+
+**Tiêu chí nghiệm thu (đã đạt):** khóa do server sinh; path traversal / symlink / kind-đuôi sai bị từ chối; `STORAGE_ROOT` không nằm trong / bao trùm `static/`, `app/`; giữ chỗ đúng hạn mức, vượt 1 byte → `409`; nhiều user độc lập; 20 request đồng thời trên file SQLite thật không vượt 1.073.741.824 byte; hoàn lại không âm; lỗi ghi/đổi chỗ/xóa xử lý đúng; migration `0004` lên/xuống sạch trên DB tạm (`down_revision = 0003`, downgrade chỉ xóa `user_storage_usage`); pytest/ruff/mypy/bandit/pip-audit đạt; `ai_video_hub.db` không đổi.
 
 ## 7. Quyết định đã được chủ dự án xác nhận (2026-11-14)
 

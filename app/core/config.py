@@ -2,6 +2,7 @@
 
 import secrets
 from functools import cache, cached_property, lru_cache
+from pathlib import Path
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
@@ -19,11 +20,34 @@ HARDENED_ENVIRONMENTS: frozenset[str] = frozenset({"staging", "production"})
 HOST_COOKIE_PREFIX = "__Host-"
 MIN_THROTTLE_KEY_LENGTH = 32
 
+# STORAGE_ROOT tương đối tính từ thư mục dự án (không phụ thuộc thư mục đang chạy lệnh)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# File người dùng không bao giờ được nằm trong (hoặc bao trùm) mã nguồn và thư mục phục vụ công khai
+STORAGE_FORBIDDEN_DIRS: tuple[Path, ...] = (PROJECT_ROOT / "static", PROJECT_ROOT / "app")
+DEFAULT_STORAGE_QUOTA_BYTES = 1_073_741_824  # 1 GiB/user (quyết định 7.5)
+
 
 @cache
 def _development_throttle_key() -> bytes:
     """Khóa ngẫu nhiên cho dev/test khi chưa cấu hình: chỉ đúng với MỘT tiến trình."""
     return secrets.token_bytes(MIN_THROTTLE_KEY_LENGTH)
+
+
+def resolve_storage_root(raw_root: str) -> Path:
+    """Đường dẫn tuyệt đối (đã resolve symlink, chuẩn hóa '..') của STORAGE_ROOT. Không tạo thư mục.
+
+    Raises:
+        ValueError: nếu thư mục nằm trong, trùng, hoặc là thư mục cha của static/ hay app/.
+    """
+    candidate = Path(raw_root)
+    root = (candidate if candidate.is_absolute() else PROJECT_ROOT / candidate).resolve()
+    for forbidden in (directory.resolve() for directory in STORAGE_FORBIDDEN_DIRS):
+        # So sánh sau resolve; trên Windows Path so khớp không phân biệt hoa/thường
+        if root.is_relative_to(forbidden) or forbidden.is_relative_to(root):
+            raise ValueError(
+                f"storage_root không được nằm trong hoặc bao trùm thư mục {forbidden.name}/"
+            )
+    return root
 
 
 class Settings(BaseSettings):
@@ -59,6 +83,12 @@ class Settings(BaseSettings):
     email_backend: EmailBackend = "file"
     email_outbox_dir: str = "storage/dev-outbox"
 
+    # --- Lưu trữ file người dùng (P2-3) ---
+    # Thư mục gốc chứa uploads/, videos/, posters/, tmp/; đã git-ignore. Thư mục được tạo khi ghi
+    # file đầu tiên, không phải lúc đọc cấu hình
+    storage_root: str = "storage"
+    storage_quota_bytes_per_user: int = Field(default=DEFAULT_STORAGE_QUOTA_BYTES, gt=0)
+
     # --- Reverse proxy ---
     # Rỗng = không có proxy: X-Forwarded-For bị bỏ qua. Có proxy: chỉ khai báo đúng IP/CIDR của
     # proxy (JSON, ví dụ ["10.0.0.5"]). Wildcard ("*", 0.0.0.0/0, ::/0) bị từ chối.
@@ -83,6 +113,16 @@ class Settings(BaseSettings):
     @cached_property
     def trusted_proxy_networks(self) -> tuple[IPNetwork, ...]:
         return parse_trusted_proxies(self.trusted_proxy_ips)
+
+    @field_validator("storage_root")
+    @classmethod
+    def validate_storage_root(cls, raw_root: str) -> str:
+        resolve_storage_root(raw_root)  # ném ValueError nếu đè lên static/ hoặc app/
+        return raw_root
+
+    @cached_property
+    def storage_root_path(self) -> Path:
+        return resolve_storage_root(self.storage_root)
 
     @field_validator("public_base_url")
     @classmethod

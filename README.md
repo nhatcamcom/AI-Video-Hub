@@ -12,7 +12,7 @@ Website **AI Video SaaS**: người dùng mua **credit trả trước** để t�
 |---|---|---|
 | 0 | Nền móng: khung app, config, DB, health, xử lý lỗi, công cụ kiểm tra | **Hoàn thành** (40 test, coverage 98.6%) |
 | 1 | Auth và người dùng: đăng ký, đăng nhập session cookie + CSRF, phân quyền, profile, quên mật khẩu, rate limit, audit | **Hoàn thành**: review đóng Phase 1 kết luận READY TO CLOSE (361 test, coverage 95,05%) |
-| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
+| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã duyệt; P2-3 (lưu trữ file + hạn mức 1 GiB/user, migration 0004) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
 | 3 | Credit ledger | Chưa bắt đầu |
 | 4 | Tích hợp nhà cung cấp AI video thật (sau khi đã xác minh API và quyền sử dụng) | Chưa bắt đầu |
 | 5 | Thanh toán (cổng thanh toán Việt Nam) | Chưa bắt đầu |
@@ -31,12 +31,14 @@ app/
 │   ├── email.py         # adapter EmailSender: file (dev) · memory (test) · disabled
 │   ├── rate_limit.py    # RateLimiter in-memory, sức chứa riêng từng rule (Redis khi nhiều worker)
 │   ├── errors.py        # AppError + các lớp lỗi + handler trả envelope {"error": {...}}
+│   ├── storage.py       # LocalStorage: khóa do server sinh, chống path traversal/symlink, ghi tmp/ rồi os.replace
 │   └── time.py          # utc_now()
 ├── modules/             # mỗi miền nghiệp vụ là một module độc lập
 │   ├── health/          # router · schemas · service
 │   ├── users/           # User, UserRole, hồ sơ, danh sách user (ADMIN)
 │   ├── auth/            # session, CSRF, Argon2id, reset mật khẩu, dependency phân quyền
-│   └── audit/           # nhật ký thao tác nhạy cảm (bảng audit_events)
+│   ├── audit/           # nhật ký thao tác nhạy cảm (bảng audit_events)
+│   └── quota/           # hạn mức dung lượng theo user (bảng user_storage_usage), giữ chỗ nguyên tử
 ├── web/                 # các trang HTML tĩnh, mount /static, header bảo mật cho mọi response
 │   ├── router.py        # PAGE_FILES: danh sách trắng đường dẫn → file trang + mount_static_files()
 │   └── security_headers.py  # CSP, nosniff, X-Frame-Options, Referrer-Policy, Permissions-Policy, HSTS
@@ -48,7 +50,7 @@ static/                  # HTML/CSS/JS thuần, không build step, không script
 ├── css/                 # tokens.css (biến thiết kế) · base.css · forms.css
 └── js/                  # api.js (điểm duy nhất gọi API) · session.js (header phiên) · authForm.js
                          #   · home.js · loginPage.js · registerPage.js · forgotPasswordPage.js · resetPasswordPage.js
-migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events, 0003 account throttling + trusted devices
+migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events, 0003 account throttling + trusted devices, 0004 user_storage_usage
 tests/
 ├── conftest.py · helpers.py
 ├── unit/
@@ -222,5 +224,7 @@ Mọi lỗi đều trả theo cùng một định dạng: `{"error": {"code": ".
 - Gọi `fetch` với `credentials: "same-origin"` (hoặc `"include"` nếu khác origin và origin đó có trong `ALLOWED_ORIGINS`).
 
 ### Thử luồng quên mật khẩu khi dev
+
+**Lưu trữ file người dùng:** `STORAGE_ROOT` (mặc định `storage`, đã git-ignore) chứa `uploads/`, `videos/`, `posters/`, `tmp/`, được tạo khi ghi file đầu tiên. Đường dẫn tương đối tính từ thư mục dự án; app từ chối khởi động nếu `STORAGE_ROOT` nằm trong hoặc bao trùm `static/` hay `app/`. Hạn mức mỗi user là `STORAGE_QUOTA_BYTES_PER_USER` (mặc định 1 GiB = 1.073.741.824 byte), tính theo byte thực ghi xuống đĩa; vượt hạn mức trả `409 storage_quota_exceeded` (dùng từ P2-4). Sau khi cập nhật code, chạy `alembic upgrade head` để tạo bảng `user_storage_usage`.
 
 Với `EMAIL_BACKEND=file`, mỗi email được ghi thành một file `.txt` trong `storage/dev-outbox/`. Thư mục này đã nằm trong `.gitignore`. Mở file mới nhất, lấy giá trị sau `#token=` rồi gọi `POST /api/v1/auth/reset-password`. Trên production, backend `file`/`memory` bị cấm và token không bao giờ xuất hiện trong response.

@@ -108,12 +108,14 @@ AI Video Hub/
 │   │   ├── client_ip.py   # IP thật của client (trusted proxy), khóa rate limit IPv4 / IPv6 /64 + /48
 │   │   ├── rate_limit.py  # rate limiter in-memory, sức chứa riêng từng rule
 │   │   ├── email.py       # adapter EmailSender (file / memory / disabled)
+│   │   ├── storage.py     # P2-3 · LocalStorage: khóa <kind>/<32 hex><đuôi> do server sinh, chống traversal/
+│   │   │                  #   symlink, ghi tmp/ rồi os.replace, mọi I/O qua asyncio.to_thread
 │   │   └── time.py        # utc_now()
 │   ├── web/               # P2-1 · giao diện cùng origin, KHÔNG chứa nghiệp vụ
 │   │   ├── router.py      # PAGE_FILES: danh sách trắng đường dẫn → trang HTML; mount /static (chặn path traversal)
 │   │   └── security_headers.py  # CSP + header bảo mật cho MỌI response; bọc NGOÀI middleware stack
 │   │                      #   (SecureHeadersFastAPI) để cả response 500 cũng có header
-│   └── modules/           # mỗi miền nghiệp vụ một thư mục: health, users, auth, audit
+│   └── modules/           # mỗi miền nghiệp vụ một thư mục: health, users, auth, audit, quota (P2-3)
 │       └── <miền>/        # chỉ có file mà miền cần (health không có models.py, audit không có router.py),
 │           │              #   có thể thêm file riêng (vd. auth: cookies.py, dependencies.py, throttle.py)
 │           ├── router.py  # router mỏng: nhận request, gọi service, trả response_model
@@ -126,7 +128,7 @@ AI Video Hub/
 │   └── js/                # api.js (điểm DUY NHẤT gọi API, chỉ /api/v1/ cùng origin) · session.js (header phiên)
 │                          #   · authForm.js · home.js · <tên trang>Page.js
 ├── migrations/            # Alembic async (env.py đọc DATABASE_URL từ Settings); alembic.ini CHỈ ASCII
-│   └── versions/          # 0001–0003; mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
+│   └── versions/          # 0001–0004; mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
 ├── tests/
 │   ├── conftest.py · helpers.py
 │   ├── unit/
@@ -147,7 +149,6 @@ Thư mục runtime cục bộ, đã git-ignore và không phải mã nguồn: `.
 ```text
 app/
 ├── worker.py              # P2-7 · python -m app.worker: entrypoint mỏng (vòng lặp, tín hiệu dừng, log)
-├── core/storage.py        # P2-3 · LocalStorage: khóa do server sinh, chống path traversal
 └── modules/
     ├── media/             # P2-4 · ảnh đầu vào
     └── videos/            # P2-6 · yêu cầu tạo video, hàng đợi (bảng videos), service job cho worker
