@@ -17,8 +17,21 @@
       <div class="site-header__inner">
         <a class="brand" href="/">AI Video Hub</a>
         <span class="badge badge--demo">Bản demo</span>
+        <nav id="session-nav" class="session" aria-label="Tài khoản" data-state="loading">
+          <p class="session__view" data-session-view="loading">Đang kiểm tra đăng nhập…</p>
+          <div class="session__view" data-session-view="anonymous" hidden>
+            <a id="session-login-link" class="session__link" href="/login">Đăng nhập</a>
+            <a class="button button--secondary" href="/register">Đăng ký</a>
+          </div>
+          <div class="session__view" data-session-view="authenticated" hidden>
+            <span class="session__user">Xin chào, <strong id="session-user-name"></strong></span>
+            <button id="logout-button" class="button button--secondary" type="button">Đăng xuất</button>
+          </div>
+          <p class="session__view" data-session-view="error" hidden>Chưa kiểm tra được trạng thái đăng nhập.</p>
+        </nav>
       </div>
     </header>
+    <p id="session-message" class="session-message" role="status" aria-live="polite"></p>
 
     <main id="main-content" class="page" tabindex="-1">
       <div class="page__header">

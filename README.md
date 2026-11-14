@@ -12,7 +12,7 @@ Website **AI Video SaaS**: người dùng mua **credit trả trước** để t�
 |---|---|---|
 | 0 | Nền móng: khung app, config, DB, health, xử lý lỗi, công cụ kiểm tra | **Hoàn thành** (40 test, coverage 98.6%) |
 | 1 | Auth và người dùng: đăng ký, đăng nhập session cookie + CSRF, phân quyền, profile, quên mật khẩu, rate limit, audit | **Hoàn thành**: review đóng Phase 1 kết luận READY TO CLOSE (361 test, coverage 95,05%) |
-| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
+| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
 | 3 | Credit ledger | Chưa bắt đầu |
 | 4 | Tích hợp nhà cung cấp AI video thật (sau khi đã xác minh API và quyền sử dụng) | Chưa bắt đầu |
 | 5 | Thanh toán (cổng thanh toán Việt Nam) | Chưa bắt đầu |
@@ -37,16 +37,17 @@ app/
 │   ├── users/           # User, UserRole, hồ sơ, danh sách user (ADMIN)
 │   ├── auth/            # session, CSRF, Argon2id, reset mật khẩu, dependency phân quyền
 │   └── audit/           # nhật ký thao tác nhạy cảm (bảng audit_events)
-├── web/                 # trang khung "/", mount /static, header bảo mật cho mọi response
-│   ├── router.py        # GET / (static/index.html) + mount_static_files()
+├── web/                 # các trang HTML tĩnh, mount /static, header bảo mật cho mọi response
+│   ├── router.py        # PAGE_FILES: danh sách trắng đường dẫn → file trang + mount_static_files()
 │   └── security_headers.py  # CSP, nosniff, X-Frame-Options, Referrer-Policy, Permissions-Policy, HSTS
 ├── model_registry.py    # nạp mọi model cho Alembic
 ├── cli.py               # python -m app.cli promote-admin <email> [--yes] | cleanup-auth
 └── server.py            # python -m app.server — cách khởi động chuẩn (tắt proxy headers của uvicorn)
 static/                  # HTML/CSS/JS thuần, không build step, không script/style inline
-├── index.html           # trang khung
-├── css/                 # tokens.css (biến thiết kế) · base.css
-└── js/                  # api.js (điểm duy nhất gọi API) · home.js
+├── index.html · login.html · register.html · forgot-password.html · reset-password.html
+├── css/                 # tokens.css (biến thiết kế) · base.css · forms.css
+└── js/                  # api.js (điểm duy nhất gọi API) · session.js (header phiên) · authForm.js
+                         #   · home.js · loginPage.js · registerPage.js · forgotPasswordPage.js · resetPasswordPage.js
 migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events, 0003 account throttling + trusted devices
 tests/
 ├── conftest.py · helpers.py
@@ -98,7 +99,7 @@ Khi nâng phiên bản SQLAlchemy hoặc mypy thì đổi số phiên bản tron
 
 **Luôn khởi động bằng `python -m app.server`.** Launcher này tắt cơ chế tự tin header proxy của uvicorn: mặc định uvicorn tin `X-Forwarded-For` từ `127.0.0.1`, nên mọi tiến trình trên máy hoặc một proxy cấu hình sai đều có thể giả mạo IP client để né rate limit. Nếu buộc phải gọi uvicorn trực tiếp, thêm `--no-proxy-headers`.
 
-- Giao diện web (trang khung, bản demo): <http://127.0.0.1:8000/>
+- Giao diện web (bản demo): <http://127.0.0.1:8000/>, đăng nhập <http://127.0.0.1:8000/login>, đăng ký `/register`, quên mật khẩu `/forgot-password`, đặt lại mật khẩu `/reset-password` (mở từ link trong email).
 - Health check: <http://127.0.0.1:8000/api/v1/health>
 - Tài liệu API (OpenAPI): <http://127.0.0.1:8000/docs>, **chỉ bật khi `APP_ENV=development`**; `test`, `staging` và `production` trả `404` cho `/docs`, `/redoc`, `/docs/oauth2-redirect` và `/openapi.json`.
 
@@ -106,6 +107,9 @@ Khi nâng phiên bản SQLAlchemy hoặc mypy thì đổi số phiên bản tron
 
 - Giao diện là HTML/CSS/JS thuần trong `static/`, được chính app phục vụ cùng origin với API: `/` trả `static/index.html`, `/static/...` trả file tĩnh. Không có build step, không cần Node.
 - Mọi lệnh gọi API từ trình duyệt đi qua `static/js/api.js`. File này chỉ nhận đường dẫn `/api/v1/...` cùng origin và tự gửi header `X-CSRF-Token` cho request thay đổi dữ liệu.
+- Các trang chỉ được phục vụ theo danh sách trắng `PAGE_FILES` trong `app/web/router.py`; đường dẫn ngoài danh sách trả `404`.
+- Giao diện dùng lại nguyên API và cơ chế session/CSRF của Phase 1: header mọi trang gọi `GET /api/v1/auth/me` để hiện trạng thái phiên (`401` nghĩa là chưa đăng nhập, Console của trình duyệt sẽ ghi dòng 401 này — đã chấp nhận); đăng xuất gọi `POST /api/v1/auth/logout`. Đăng ký thành công sẽ tự đăng nhập; nếu bước đó lỗi, trang hướng dẫn đăng nhập thủ công.
+- Trang `/reset-password` đọc token từ `#token=...`, xóa nó khỏi URL ngay bằng `history.replaceState`, chỉ giữ trong bộ nhớ JS (không `localStorage`/`sessionStorage`), và không gọi API nếu thiếu token hợp lệ. Khi dev, email nằm trong `EMAIL_OUTBOX_DIR` (mặc định `storage/dev-outbox/`, đã git-ignore); không gửi tới hộp thư thật.
 - Mọi response (trang, file tĩnh, API, cả lỗi 4xx/5xx) có `Content-Security-Policy` chặt (không `unsafe-inline`/`unsafe-eval`), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy`. `Strict-Transport-Security` chỉ gửi khi `COOKIE_SECURE=true` (chạy sau HTTPS).
 - Vì CSP chặn script và style inline, mọi JS/CSS mới phải nằm trong file riêng dưới `static/`. Dữ liệu người dùng chỉ hiển thị bằng `textContent`.
 - Ngoại lệ CSP duy nhất là `/docs`, `/redoc`, `/docs/oauth2-redirect` (Swagger UI / ReDoc cần script CDN và inline). Các trang này chỉ tồn tại khi `APP_ENV=development`; ở `test`, `staging` và `production` chúng trả `404` và không có ngoại lệ CSP nào được áp dụng.

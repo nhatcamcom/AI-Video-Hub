@@ -1,0 +1,91 @@
+/* Form xác thực: ô nhập, nhãn, gợi ý, lỗi theo ô, vùng trạng thái.
+   Lỗi luôn có chữ (không chỉ đổi màu viền); mọi màu lấy từ tokens.css. */
+.form {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.field {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.field__label {
+  font-weight: var(--font-weight-medium);
+}
+
+.field__input {
+  width: 100%;
+  min-height: var(--touch-target-min);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.field__input[aria-invalid="true"] {
+  border-color: var(--color-danger-icon);
+  border-width: 2px;
+}
+
+.field__hint {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.field__error {
+  color: var(--color-danger-text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.field__error::before {
+  content: "Lỗi: ";
+}
+
+.form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.form__links {
+  display: grid;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* Vùng thông báo của form: thông tin / thành công / lỗi, luôn kèm chữ */
+.form-status {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--color-info-bg);
+  color: var(--color-info-text);
+  overflow-wrap: anywhere;
+}
+
+.form-status[data-state="success"] {
+  background: var(--color-success-bg);
+  color: var(--color-success-text);
+}
+
+.form-status[data-state="error"] {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-text);
+}
+
+.form-status .link {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.notice {
+  display: grid;
+  gap: var(--space-3);
+}

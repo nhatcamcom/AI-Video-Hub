@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Đăng nhập — AI Video Hub</title>
+    <meta name="robots" content="noindex">
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/css/tokens.css">
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/forms.css">
+    <script type="module" src="/static/js/loginPage.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Bỏ qua tới nội dung chính</a>
+
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="brand" href="/">AI Video Hub</a>
+        <span class="badge badge--demo">Bản demo</span>
+        <nav id="session-nav" class="session" aria-label="Tài khoản" data-state="loading">
+          <p class="session__view" data-session-view="loading">Đang kiểm tra đăng nhập…</p>
+          <div class="session__view" data-session-view="anonymous" hidden>
+            <a id="session-login-link" class="session__link" href="/login">Đăng nhập</a>
+            <a class="button button--secondary" href="/register">Đăng ký</a>
+          </div>
+          <div class="session__view" data-session-view="authenticated" hidden>
+            <span class="session__user">Xin chào, <strong id="session-user-name"></strong></span>
+            <button id="logout-button" class="button button--secondary" type="button">Đăng xuất</button>
+          </div>
+          <p class="session__view" data-session-view="error" hidden>Chưa kiểm tra được trạng thái đăng nhập.</p>
+        </nav>
+      </div>
+    </header>
+    <p id="session-message" class="session-message" role="status" aria-live="polite"></p>
+
+    <main id="main-content" class="page page--narrow" tabindex="-1">
+      <div class="page__header">
+        <h1 class="page__title">Đăng nhập</h1>
+        <p class="page__lead">Đăng nhập để tạo và quản lý video của bạn.</p>
+      </div>
+
+      <section id="signed-in-notice" class="panel notice" aria-label="Đã đăng nhập" hidden>
+        <p>Bạn đang đăng nhập với tên <strong id="signed-in-name"></strong>.</p>
+        <p><a class="button" href="/">Về trang chủ</a></p>
+      </section>
+
+      <section id="login-section" class="panel" aria-label="Biểu mẫu đăng nhập">
+        <form id="login-form" class="form" method="post" data-status="login-status">
+          <div class="field">
+            <label class="field__label" for="login-email">Email</label>
+            <input id="login-email" class="field__input" name="email" type="email" autocomplete="username" maxlength="254" required aria-describedby="login-email-error">
+            <p id="login-email-error" class="field__error" hidden></p>
+          </div>
+          <div class="field">
+            <label class="field__label" for="login-password">Mật khẩu</label>
+            <input id="login-password" class="field__input" name="password" type="password" autocomplete="current-password" maxlength="128" required aria-describedby="login-password-error">
+            <p id="login-password-error" class="field__error" hidden></p>
+          </div>
+          <div class="form__actions">
+            <button class="button" type="submit">Đăng nhập</button>
+          </div>
+        </form>
+        <div class="form__links">
+          <p><a class="link" href="/forgot-password">Quên mật khẩu?</a></p>
+          <p>Chưa có tài khoản? <a class="link" href="/register">Đăng ký</a></p>
+        </div>
+      </section>
+
+      <div id="login-status" role="status" aria-live="polite">
+        <div class="form-status" hidden>
+          <p data-status-text></p>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

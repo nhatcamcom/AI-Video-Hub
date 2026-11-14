@@ -110,7 +110,7 @@ AI Video Hub/
 │   │   ├── email.py       # adapter EmailSender (file / memory / disabled)
 │   │   └── time.py        # utc_now()
 │   ├── web/               # P2-1 · giao diện cùng origin, KHÔNG chứa nghiệp vụ
-│   │   ├── router.py      # GET / (static/index.html) + mount /static (StaticFiles, chặn path traversal)
+│   │   ├── router.py      # PAGE_FILES: danh sách trắng đường dẫn → trang HTML; mount /static (chặn path traversal)
 │   │   └── security_headers.py  # CSP + header bảo mật cho MỌI response; bọc NGOÀI middleware stack
 │   │                      #   (SecureHeadersFastAPI) để cả response 500 cũng có header
 │   └── modules/           # mỗi miền nghiệp vụ một thư mục: health, users, auth, audit
@@ -120,10 +120,11 @@ AI Video Hub/
 │           ├── schemas.py # Pydantic: XxxCreate / XxxUpdate / XxxResponse tách riêng
 │           ├── service.py # nghiệp vụ và transaction
 │           └── models.py  # SQLAlchemy ORM models của miền
-├── static/                # P2-1 · HTML/CSS/JS thuần, không build step, không script/style inline (CSP)
-│   ├── index.html         # trang khung
-│   ├── css/               # tokens.css (biến thiết kế) · base.css
-│   └── js/                # api.js (điểm DUY NHẤT gọi API, chỉ /api/v1/ cùng origin) · home.js
+├── static/                # P2-1/P2-2 · HTML/CSS/JS thuần, không build step, không script/style inline (CSP)
+│   ├── index.html · login.html · register.html · forgot-password.html · reset-password.html
+│   ├── css/               # tokens.css (biến thiết kế) · base.css · forms.css
+│   └── js/                # api.js (điểm DUY NHẤT gọi API, chỉ /api/v1/ cùng origin) · session.js (header phiên)
+│                          #   · authForm.js · home.js · <tên trang>Page.js
 ├── migrations/            # Alembic async (env.py đọc DATABASE_URL từ Settings); alembic.ini CHỈ ASCII
 │   └── versions/          # 0001–0003; mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
 ├── tests/
@@ -151,7 +152,7 @@ app/
     ├── media/             # P2-4 · ảnh đầu vào
     └── videos/            # P2-6 · yêu cầu tạo video, hàng đợi (bảng videos), service job cho worker
         └── providers/     # P2-5/P2-7 · VideoProvider + MockProvider
-static/*.html, static/js/*.js  # P2-2 trở đi · các trang và module JS theo tính năng (login, create, library…)
+static/*.html, static/js/*.js  # P2-9 trở đi · các trang và module JS theo tính năng (dashboard, create, library…)
 storage/uploads/, storage/videos/  # P2-3 trở đi · file của user, ngoài static/ và mã nguồn, đã git-ignore
 tests/e2e/                 # chỉ khi chủ dự án đồng ý cài Playwright (P2-13)
 templates/                 # TÙY CHỌN, xem ghi chú bên dưới

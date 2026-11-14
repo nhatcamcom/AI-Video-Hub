@@ -12,6 +12,7 @@
   /* Hành động chính */
   --color-accent: #0f5c8c;          /* chữ trắng trên nền này: 7.2:1 */
   --color-accent-hover: #0b4a72;
+  --color-secondary-hover-bg: #eef4f9; /* --color-accent trên nền này: 6.5:1 */
   --color-on-accent: #ffffff;
   --color-focus: #1a56db;           /* 5.7:1 trên --color-bg */
 

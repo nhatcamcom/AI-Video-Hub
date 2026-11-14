@@ -87,7 +87,7 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 |---|---|---|
 | P2-0 | Chốt quyết định mục 7, ghi ADR (hàng đợi DB + worker, frontend không build step) | Quyết định đã chốt; README và CLAUDE.md đã đồng bộ (2026-11-14). **Còn lại:** ADR trong `docs/adr/` |
 | P2-1 | Khung web: phục vụ `static/`, layout chung, `tokens.css`, `api.js`, middleware header bảo mật | Xem chi tiết ở 6.1 |
-| P2-2 | Trang đăng nhập / đăng ký / quên & đặt lại mật khẩu (UI cho API Phase 1) | Dùng đúng API hiện có, gửi `X-CSRF-Token`; hiển thị lỗi `429` có thời gian chờ; a11y (label, focus, aria-live) |
+| P2-2 | Trang đăng nhập / đăng ký / quên & đặt lại mật khẩu (UI cho API Phase 1) | Xem chi tiết ở 6.2 |
 | P2-3 | `core/storage.py` (LocalStorage) + cấu hình giới hạn + hạn mức 1 GB/user (4.1) | Khóa ngẫu nhiên do server sinh; test chống path traversal; thư mục ngoài `static/` và đã git-ignore; giữ chỗ hạn mức nguyên tử, test nhiều upload đồng thời không vượt 1.073.741.824 byte |
 | P2-4 | Upload ảnh + `media_assets` + `user_storage_usage` + migration 0004; cài `python-multipart`; **xem xét Pillow** để loại bỏ metadata (7.8) — mọi dependency kiểm tra tương thích trước khi cài | Định dạng xác định **chỉ bằng magic bytes** (whitelist PNG/JPEG/WebP); `content_type` và tên/đuôi file client gửi bị bỏ qua (test: file PNG gửi kèm `content_type=image/jpeg` và tên `x.exe` vẫn được lưu là PNG; file HTML gửi kèm `content_type=image/png` → 415); tên file và đuôi do server đặt theo định dạng đã xác định; phục vụ lại bằng content type đã lưu + `nosniff`; đếm byte thật, dừng ở 10 MB; 409/413/415/429; không tin kích thước client khai báo; **file lưu lâu dài không còn EXIF/GPS** (test bằng ảnh mẫu có EXIF/GPS cho cả JPEG, PNG, WebP); ảnh người khác → 404; migration up/down sạch |
 | P2-5 | Registry model + `GET /video-models` | Chỉ trả model bật trong cấu hình; Mock gắn nhãn demo; test |
@@ -127,6 +127,33 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 7. ruff, mypy strict, pytest (coverage ≥ 80%), bandit, pip-audit đều đạt; có bằng chứng RED → GREEN.
 
 **Dependency:** không cần dependency mới (StaticFiles có sẵn trong Starlette 1.10, không cần `aiofiles`). **Không cài Pillow trong P2-1**; Pillow chỉ được xem xét ở P2-4.
+
+### 6.2 Chi tiết P2-2 — Giao diện xác thực (đã duyệt 2026-11-14)
+
+**Mục tiêu:** người dùng đăng ký, đăng nhập, đăng xuất, quên và đặt lại mật khẩu qua giao diện, dùng **nguyên API và cơ chế session/CSRF của Phase 1** (không sửa backend auth).
+
+**Quyết định của chủ dự án:**
+- A. Đăng ký thành công → tự gọi `POST /auth/login`; nếu lỗi, báo tài khoản đã được tạo và hướng dẫn đăng nhập thủ công.
+- B. Giữ `/forgot-password` và `/reset-password` trong P2-2 (link email Phase 1 trỏ cố định tới `/reset-password#token=...`).
+- C. Chấp nhận `GET /auth/me` trả `401` khi chưa đăng nhập (Console ghi dòng 401); không sửa backend.
+- D. Kiểm thử trình duyệt dùng DB tạm trong scratchpad: in và xác minh `DATABASE_URL` thực tế trước khi chạy Alembic, dừng nếu không xác minh được; email test ghi vào outbox tạm (`EMAIL_BACKEND=file`), chỉ dùng `@example.com`.
+
+**API sử dụng** (`/api/v1`): `POST /auth/register`, `POST /auth/login`, `POST /auth/logout` (có `X-CSRF-Token`), `GET /auth/me`, `POST /auth/forgot-password`, `POST /auth/reset-password`.
+
+**Trong phạm vi:** trang `/login`, `/register`, `/forgot-password`, `/reset-password` (danh sách trắng `PAGE_FILES`); header trạng thái phiên trên mọi trang (tên hiển thị bằng `textContent`, nút Đăng xuất); lỗi `422` hiện dưới từng ô, `429` hiện thời gian chờ, `403 csrf_failed` hướng dẫn tải lại trang, không tự gửi lại request khi gặp `401`/`403`.
+
+**Ngoài phạm vi:** sửa backend auth/cookie/session/CSRF; trang hồ sơ (`PATCH /users/me`); xác minh email; dashboard (P2-9); chuyển hướng `?next=` (luôn về `/` để tránh open redirect).
+
+**Tiêu chí nghiệm thu:**
+1. 4 trang trả `200 text/html` với CSP chặt; đường dẫn ngoài danh sách (`/login.html`, `/admin`, `/Login`…) trả `404`; `POST` tới đường dẫn trang trả `405` và không phản hồi lại dữ liệu đã gửi.
+2. Form `method="post"`, không `action`, mọi ô có `<label>`, `autocomplete` đúng (`current-password`/`new-password`/`email`/`username`); mật khẩu không bao giờ lên URL.
+3. Đăng nhập sai → "Email hoặc mật khẩu không đúng", xóa ô mật khẩu; đúng → về `/`, header hiện tên.
+4. Đăng ký: `422` theo ô, `409` theo ô email; thành công tự đăng nhập; tự đăng nhập lỗi → hướng dẫn đăng nhập thủ công.
+5. Đăng xuất gửi `X-CSRF-Token`; header xóa tên cũ; sau đó `/auth/me` trả `401`.
+6. Quên mật khẩu: cùng một thông báo cho email có và không có.
+7. Đặt lại mật khẩu: token đọc từ fragment, xóa khỏi URL ngay (kể cả khi mở link lúc đang ở chính trang — `hashchange`), không lưu storage, không gọi API khi thiếu token hợp lệ; thành công → mọi phiên bị thu hồi, header về chưa đăng nhập; dùng lại token → báo hết hạn + link yêu cầu mới.
+8. Kiểm thử trình duyệt ở 390x844 và 1440x900: không vi phạm CSP, không lỗi JS (lỗi mạng chỉ là phản hồi 4xx của `/api/v1`), vùng chạm ≥ 44px, focus nhìn thấy được.
+9. pytest (coverage ≥ 80%), ruff, mypy, bandit, pip-audit đạt; có bằng chứng RED → GREEN; DB chính không đổi.
 
 ## 7. Quyết định đã được chủ dự án xác nhận (2026-11-14)
 

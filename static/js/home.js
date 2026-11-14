@@ -1,5 +1,6 @@
 // static/js/home.js — trang khung: kiểm tra kết nối máy chủ qua api.js (loading / success / error)
 import { ApiError, apiRequest } from "./api.js";
+import { createSessionHeader } from "./session.js";
 
 const HEALTH_PATH = "/api/v1/health";
 const LOADING_MESSAGE = "Đang kiểm tra kết nối máy chủ…";
@@ -62,3 +63,4 @@ function initHomePage() {
 }
 
 initHomePage();
+createSessionHeader().refresh();

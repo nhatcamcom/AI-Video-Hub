@@ -96,6 +96,58 @@ p {
   color: var(--color-accent);
 }
 
+/* ---------------------------------------------------------------- trạng thái phiên (header) */
+.session {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  font-size: var(--font-size-sm);
+}
+
+.session__view {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.session__user {
+  overflow-wrap: anywhere;
+}
+
+.session__user strong {
+  color: var(--color-text);
+}
+
+.session__link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--touch-target-min);
+  padding: 0 var(--space-2);
+  color: var(--color-accent);
+  font-weight: var(--font-weight-medium);
+}
+
+.session-message {
+  max-width: var(--content-max-width);
+  margin: var(--space-3) auto 0;
+  padding: var(--space-2) var(--space-4);
+  color: var(--color-text);
+}
+
+/* Rỗng thì không chiếm chỗ, nhưng vẫn ở trong cây trợ năng (không display: none) */
+.session-message:empty {
+  margin: 0 auto;
+  padding: 0;
+}
+
+.link {
+  color: var(--color-accent);
+  font-weight: var(--font-weight-medium);
+}
+
 /* ---------------------------------------------------------------- huy hiệu */
 .badge {
   display: inline-flex;
@@ -125,6 +177,10 @@ p {
   display: grid;
   gap: var(--space-2);
   max-width: 48rem;
+}
+
+.page--narrow {
+  max-width: 30rem;
 }
 
 .page__title {
@@ -170,6 +226,29 @@ p {
 
 .button:hover {
   background: var(--color-accent-hover);
+  color: var(--color-on-accent);
+}
+
+/* Nút / link dạng nút phụ: nền sáng, chữ màu nhấn (6.5:1), viền đủ 3:1 */
+.button--secondary {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-accent);
+}
+
+.button--secondary:hover {
+  background: var(--color-secondary-hover-bg);
+  color: var(--color-accent-hover);
+}
+
+a.button {
+  text-decoration: none;
+}
+
+/* Đang gửi: giữ focus trên nút (aria-disabled thay cho disabled) nhưng báo rõ không bấm được */
+.button[aria-disabled="true"] {
+  cursor: progress;
+  opacity: 0.75;
 }
 
 /* ---------------------------------------------------------------- vùng trạng thái */
