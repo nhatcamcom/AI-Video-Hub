@@ -23,7 +23,7 @@ Hướng dẫn bắt buộc cho Claude Code khi làm việc trong dự án này.
   - Băm/kiểm tra mật khẩu từ code async chỉ qua `hash_password_async` / `verify_password_async` (thread pool giới hạn RAM Argon2), không gọi `asyncio.to_thread` trực tiếp.
   - Mọi thao tác quản trị nhạy cảm (đổi quyền, sau này là credit) phải ghi `AuditService.record()` **trong cùng transaction** với thay đổi, và không ghi email hay secret vào audit hoặc log.
 - **Chạy server:** luôn dùng `python -m app.server` (tắt `proxy_headers` của uvicorn). Việc tin header proxy chỉ do `TRUSTED_PROXY_IPS` quyết định. Không hướng dẫn chạy `uvicorn` trực tiếp mà thiếu `--no-proxy-headers`.
-- **Chạy worker (dự kiến từ P2-7, chưa có code):** `python -m app.worker`, là **tiến trình riêng**, khởi động và dừng độc lập với web server. Không chạy worker bên trong tiến trình web server (không khởi động trong `lifespan` hay background task của `create_app()`). Server và worker chỉ trao đổi qua database (bảng job) và thư mục lưu trữ; server vẫn chạy được khi không có worker.
+- **Chạy worker (P2-7):** `python -m app.worker` (thêm `--exit-when-idle` để xử lý hết hàng đợi rồi thoát), là **tiến trình riêng**, khởi động và dừng độc lập với web server. Không chạy worker bên trong tiến trình web server (không khởi động trong `lifespan` hay background task của `create_app()`). Server và worker chỉ trao đổi qua database (bảng job) và thư mục lưu trữ; server vẫn chạy được khi không có worker.
 - **Engine database** luôn tạo qua `create_engine()` (app) hoặc `create_migration_engine()` (Alembic). Cả hai bật `hide_parameters=True`, nên lỗi SQL không làm lộ email, hash hay token vào log.
 
 ## Skill dự án `ai-video-hub` (đọc đầu tiên)
@@ -109,6 +109,8 @@ AI Video Hub/
 │   │   ├── client_ip.py   # IP thật của client (trusted proxy), khóa rate limit IPv4 / IPv6 /64 + /48
 │   │   ├── rate_limit.py  # rate limiter in-memory, sức chứa riêng từng rule
 │   │   ├── email.py       # adapter EmailSender (file / memory / disabled)
+│   │   ├── background_tasks.py # P2-7 · BACKGROUND_TASKS (registry task nền của tiến trình) + shutdown_background:
+│   │   │                  #   drain → hủy → drain; còn task sống → log critical, KHÔNG dispose engine
 │   │   ├── storage.py     # P2-3 · LocalStorage: khóa <kind>/<32 hex><đuôi> do server sinh, chống traversal/
 │   │   │                  #   symlink, ghi tmp/ rồi os.replace, mọi I/O qua asyncio.to_thread
 │   │   └── time.py        # utc_now()
@@ -122,7 +124,13 @@ AI Video Hub/
 │       │                  #   rate_limits.py (MEDIA_CAPACITY_SHARES), bảng media_assets
 │       ├── videos/        # P2-5 · catalog.py: VideoModelSpec (nguồn DUY NHẤT về khả năng model), KNOWN_VIDEO_MODELS,
 │       │                  #   build_video_model_catalog(ENABLED_VIDEO_MODELS); router GET /video-models. Key model
-│       │                  #   bất biến; Mock là demo, không phải AI thật. Chưa có models.py/service.py (P2-6)
+│       │                  #   bất biến; Mock là demo, không phải AI thật.
+│       │                  # P2-6 · models.py (bảng videos; tối đa 2 job đang chạy = active_slot + UNIQUE
+│       │                  #   uq_videos_owner_id_active_slot), service.py (tạo job, phân loại IntegrityError,
+│       │                  #   chỉ retry tranh chấp slot), rate_limits.py (VIDEO_CAPACITY_SHARES), errors.py
+│       │                  # P2-7 · jobs.py (claim / lease / retry / requeue / reaper bằng CAS theo lease_token),
+│       │                  #   heartbeat.py, output.py (lưu đầu ra theo hợp đồng quota 4.2), runner.py (VideoWorker),
+│       │                  #   providers/ (VideoProvider, MockProvider — bản demo, không phải AI thật)
 │       └── <miền>/        # chỉ có file mà miền cần (health không có models.py, audit không có router.py),
 │           │              #   có thể thêm file riêng (vd. auth: cookies.py, dependencies.py, throttle.py)
 │           ├── router.py  # router mỏng: nhận request, gọi service, trả response_model
@@ -135,7 +143,7 @@ AI Video Hub/
 │   └── js/                # api.js (điểm DUY NHẤT gọi API, chỉ /api/v1/ cùng origin) · session.js (header phiên)
 │                          #   · authForm.js · home.js · <tên trang>Page.js
 ├── migrations/            # Alembic async (env.py đọc DATABASE_URL từ Settings); alembic.ini CHỈ ASCII
-│   └── versions/          # 0001–0005; mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
+│   └── versions/          # 0001–0007; mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
 ├── tests/
 │   ├── conftest.py · helpers.py
 │   ├── unit/
@@ -155,11 +163,8 @@ Thư mục runtime cục bộ, đã git-ignore và không phải mã nguồn: `.
 
 ```text
 app/
-├── worker.py              # P2-7 · python -m app.worker: entrypoint mỏng (vòng lặp, tín hiệu dừng, log)
 └── modules/
-    └── videos/            # đã có catalog/router (P2-5); P2-6 thêm models.py/service.py: yêu cầu tạo video,
-        │                  #   hàng đợi (bảng videos), service job cho worker
-        └── providers/     # P2-7 · VideoProvider + MockProvider
+    └── videos/            # P2-8 · danh sách, nội dung, poster, xóa video + cleanup-storage / đối soát
 static/*.html, static/js/*.js  # P2-9 trở đi · các trang và module JS theo tính năng (dashboard, create, library…)
 storage/uploads/, storage/videos/  # P2-3 trở đi · file của user, ngoài static/ và mã nguồn, đã git-ignore
 tests/e2e/                 # chỉ khi chủ dự án đồng ý cài Playwright (P2-13)

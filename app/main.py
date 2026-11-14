@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.body_limit import RequestBodyLimitMiddleware
 
+from app.core.background_tasks import BACKGROUND_TASKS, shutdown_background
 from app.core.config import AppEnvironment, Settings, get_settings
 from app.core.database import create_engine, create_session_factory
 from app.core.email import create_email_sender
@@ -29,7 +30,9 @@ from app.modules.media.rate_limits import MEDIA_CAPACITY_SHARES
 from app.modules.media.router import router as media_router
 from app.modules.users.router import router as users_router
 from app.modules.videos.catalog import build_video_model_catalog
+from app.modules.videos.rate_limits import VIDEO_CAPACITY_SHARES
 from app.modules.videos.router import router as video_models_router
+from app.modules.videos.router import videos_router
 from app.web.router import mount_static_files
 from app.web.router import router as web_router
 from app.web.security_headers import SecureHeadersFastAPI, SecurityHeadersPolicy
@@ -43,13 +46,17 @@ OPENAPI_URL = "/openapi.json"
 CORS_ALLOWED_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
 CORS_BASE_HEADERS = ["Authorization", "Content-Type"]
 # Mọi rule IP in-memory của app, mỗi rule một phần sức chứa riêng (tỉ trọng, không cần tổng 100)
-APP_CAPACITY_SHARES: dict[RateLimitRule, int] = {**AUTH_CAPACITY_SHARES, **MEDIA_CAPACITY_SHARES}
+APP_CAPACITY_SHARES: dict[RateLimitRule, int] = {
+    **AUTH_CAPACITY_SHARES,
+    **MEDIA_CAPACITY_SHARES,
+    **VIDEO_CAPACITY_SHARES,
+}
 
 
 def create_rate_limiter(
     settings: Settings, clock: Callable[[], float] = time.monotonic
 ) -> RateLimiter:
-    """Limiter của app: mỗi rule (auth, media) có sức chứa riêng, chia từ RATE_LIMIT_MAX_KEYS."""
+    """Limiter của app: mỗi rule (auth, media, video) có sức chứa riêng từ RATE_LIMIT_MAX_KEYS."""
     if not settings.rate_limit_enabled:
         return NoopRateLimiter()
     return InMemoryRateLimiter(
@@ -70,8 +77,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
-        image_gate.close()  # dừng thread pool xử lý ảnh
-        await engine.dispose()  # đóng pool kết nối khi tắt app
+        image_gate.close()  # dừng thread pool xử lý ảnh (task dọn dẹp không dùng tới nó)
+        # Chờ task dọn dẹp nền rồi mới dispose; còn task sống → KHÔNG dispose (P2-7, W10)
+        await shutdown_background(
+            BACKGROUND_TASKS,
+            engine,
+            drain_seconds=app_settings.shutdown_drain_seconds,
+            cancel_grace_seconds=app_settings.shutdown_cancel_grace_seconds,
+        )
 
     # Tài liệu API (/docs, /redoc, /docs/oauth2-redirect, /openapi.json) CHỈ bật ở development;
     # test, staging, production trả 404 và không áp dụng ngoại lệ CSP của trang docs
@@ -119,6 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(users_router, prefix=API_V1_PREFIX)
     app.include_router(media_router, prefix=API_V1_PREFIX)
     app.include_router(video_models_router, prefix=API_V1_PREFIX)
+    app.include_router(videos_router, prefix=API_V1_PREFIX)
     app.include_router(web_router)
     mount_static_files(app)
     return app

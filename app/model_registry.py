@@ -8,5 +8,13 @@ from app.modules.auth import models as auth_models
 from app.modules.media import models as media_models
 from app.modules.quota import models as quota_models
 from app.modules.users import models as users_models
+from app.modules.videos import models as videos_models
 
-__all__ = ["audit_models", "auth_models", "media_models", "quota_models", "users_models"]
+__all__ = [
+    "audit_models",
+    "auth_models",
+    "media_models",
+    "quota_models",
+    "users_models",
+    "videos_models",
+]

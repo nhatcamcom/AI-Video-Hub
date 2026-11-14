@@ -27,6 +27,11 @@ from app.modules.media.rate_limits import (
     MEDIA_UPLOAD_LIMIT,
     media_upload_checks,
 )
+from app.modules.videos.rate_limits import (
+    VIDEO_CAPACITY_SHARES,
+    VIDEO_CREATE_LIMIT,
+    video_create_checks,
+)
 from tests.conftest import build_settings, create_schema, sqlite_file_url
 from tests.helpers import DEFAULT_EMAIL, login_user, register_user
 
@@ -148,13 +153,14 @@ async def test_different_48s_are_not_merged(app: FastAPI) -> None:
         assert await reset_status(other_network) == 400
 
 
-def test_app_reserves_capacity_for_every_auth_and_media_rule(app: FastAPI) -> None:
+def test_app_reserves_capacity_for_every_auth_media_and_video_rule(app: FastAPI) -> None:
     limiter = app.state.rate_limiter
     assert isinstance(limiter, InMemoryRateLimiter)
     expected = allocate_capacity(MAX_KEYS, APP_CAPACITY_SHARES)
 
-    assert set(AUTH_CAPACITY_SHARES).isdisjoint(MEDIA_CAPACITY_SHARES)  # tên rule không trùng
-    assert set(APP_CAPACITY_SHARES) == set(AUTH_CAPACITY_SHARES) | set(MEDIA_CAPACITY_SHARES)
+    domains = [set(AUTH_CAPACITY_SHARES), set(MEDIA_CAPACITY_SHARES), set(VIDEO_CAPACITY_SHARES)]
+    assert sum(len(rules) for rules in domains) == len(set().union(*domains))  # không trùng rule
+    assert set(APP_CAPACITY_SHARES) == set().union(*domains)
     assert {rule: limiter.capacity_for(rule) for rule in APP_CAPACITY_SHARES} == expected
     assert all(capacity >= 1 for capacity in expected.values())
     assert sum(expected.values()) <= MAX_KEYS
@@ -211,3 +217,35 @@ async def test_ipv4_and_ipv4_mapped_clients_keep_per_address_limits(app: FastAPI
         assert await reset_status(mapped_same) == 429  # cùng địa chỉ IPv4
     async with client_from(app, "203.0.113.6") as neighbour:
         assert await reset_status(neighbour) == 400  # IPv4 không bị gom theo mạng
+
+
+def test_filling_video_capacity_fails_closed_and_leaves_media_and_auth_untouched(
+    app: FastAPI,
+) -> None:
+    limiter = app.state.rate_limiter
+    assert isinstance(limiter, InMemoryRateLimiter)
+    for index in range(limiter.capacity_for(VIDEO_CREATE_LIMIT.ipv4)):
+        subject = RateLimitSubject.from_client_ip(f"198.51.100.{index + 1}")
+        assert limiter.hit_all(video_create_checks(subject)) is None
+
+    newcomer = RateLimitSubject.from_client_ip(NEW_CLIENT_IP)
+    assert limiter.hit_all(video_create_checks(newcomer)) is not None  # IPv4 video: fail-closed
+    assert limiter.hit_all(media_upload_checks(newcomer)) is None
+    assert limiter.hit_all(login_checks(newcomer)) is None
+
+
+def test_video_ipv6_network_budget_is_shared_across_64_prefixes(app: FastAPI) -> None:
+    limiter = app.state.rate_limiter
+    assert isinstance(limiter, InMemoryRateLimiter)
+    network_budget = VIDEO_CREATE_LIMIT.ipv4.max_requests * IPV6_NETWORK_BUDGET_MULTIPLIER
+    assert VIDEO_CREATE_LIMIT.ipv6_network.max_requests == network_budget
+    per_client = VIDEO_CREATE_LIMIT.ipv6_client.max_requests
+    for index in range(network_budget // per_client):
+        subject = RateLimitSubject.from_client_ip(f"2001:db8:cc:{index:x}::1")
+        for _ in range(per_client):
+            assert limiter.hit_all(video_create_checks(subject)) is None
+
+    same_network = RateLimitSubject.from_client_ip("2001:db8:cc:ffff::1")
+    other_network = RateLimitSubject.from_client_ip("2001:db8:dd::1")
+    assert limiter.hit_all(video_create_checks(same_network)) is not None
+    assert limiter.hit_all(video_create_checks(other_network)) is None

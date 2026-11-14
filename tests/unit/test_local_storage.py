@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -15,7 +16,10 @@ from app.core.storage import (
     ALLOWED_EXTENSIONS,
     TEMP_DIR_NAME,
     TEMP_FILE_MAX_AGE_SECONDS,
+    CommitAttempt,
+    CommitOutcome,
     DeleteOutcome,
+    FileState,
     InvalidStorageKeyError,
     LocalStorage,
     StorageKind,
@@ -440,7 +444,15 @@ async def test_file_io_runs_in_worker_threads(
         offloaded.append(getattr(function, "__name__", repr(function)))
         return await real_to_thread(function, *args, **kwargs)
 
+    replace_threads: list[threading.Thread] = []
+    real_replace = os.replace
+
+    def recording_replace(*args: Any) -> None:
+        replace_threads.append(threading.current_thread())
+        real_replace(*args)
+
     monkeypatch.setattr(asyncio, "to_thread", recording_to_thread)
+    monkeypatch.setattr(os, "replace", recording_replace)
     key = storage.new_key(StorageKind.UPLOADS, ".png")
     temp = await storage.write_temp_file(chunks_of(b"a", b"b"))
     await storage.commit_temp_file(temp, key)
@@ -448,3 +460,284 @@ async def test_file_io_runs_in_worker_threads(
     await storage.remove_stale_temp_files()
 
     assert len(offloaded) >= 6  # mở + ghi từng chunk + đóng, replace, unlink, dọn tmp
+    assert replace_threads and threading.main_thread() not in replace_threads
+
+
+# ----------------------------------------------------------------- hủy khi đổi chỗ (P2-4.1)
+# Thread thật + threading.Event có timeout; không dùng sleep để đồng bộ.
+THREAD_TIMEOUT_SECONDS = 10
+STILL_RUNNING_PROBE_SECONDS = 0.2  # chỉ để xác nhận task CHƯA kết thúc, không dùng để đồng bộ
+
+
+class ThreadBlocker:
+    """Bọc một hàm chạy trong thread: báo khi bắt đầu, chờ test cho phép rồi mới chạy tiếp."""
+
+    def __init__(
+        self,
+        real: Callable[..., Any],
+        error: BaseException | None = None,
+        match: Callable[..., bool] = lambda *_: True,
+    ) -> None:
+        self.real = real
+        self.error = error
+        self.match = match  # chỉ chặn các lời gọi khớp; lời gọi khác chạy ngay
+        self.calls = 0
+        self.entered = threading.Event()
+        self.proceed = threading.Event()
+        self.finished = threading.Event()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if not self.match(*args):
+            return self.real(*args, **kwargs)
+        self.calls += 1
+        self.entered.set()
+        try:
+            if not self.proceed.wait(THREAD_TIMEOUT_SECONDS):
+                raise TimeoutError("test không cho thread chạy tiếp")
+            if self.error is not None:
+                raise self.error
+            return self.real(*args, **kwargs)
+        finally:
+            self.finished.set()
+
+
+async def wait_thread_event(event: threading.Event) -> None:
+    assert await asyncio.to_thread(event.wait, THREAD_TIMEOUT_SECONDS)
+
+
+async def still_running(task: asyncio.Task[Any]) -> bool:
+    _, pending = await asyncio.wait({task}, timeout=STILL_RUNNING_PROBE_SECONDS)
+    return task in pending
+
+
+def block_replace(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException | None = None
+) -> ThreadBlocker:
+    blocker = ThreadBlocker(os.replace, error)
+    monkeypatch.setattr(os, "replace", blocker)
+    return blocker
+
+
+async def prepared(storage: LocalStorage) -> tuple[TempFile, str, Path]:
+    temp = await storage.write_temp_file(chunks_of(b"data"))
+    key = storage.new_key(StorageKind.UPLOADS, ".png")
+    return temp, key, storage.path_for(key)
+
+
+async def test_cancel_before_replace_starts_is_not_committed(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, destination = await prepared(storage)
+    mkdir = ThreadBlocker(Path.mkdir)
+    monkeypatch.setattr(Path, "mkdir", lambda path, *a, **kw: mkdir(path, *a, **kw))
+    replace_calls: list[object] = []
+    monkeypatch.setattr(os, "replace", lambda *args: replace_calls.append(args))
+    attempt = CommitAttempt()
+
+    task = asyncio.create_task(storage.commit_temp_file(temp, key, attempt))
+    await wait_thread_event(mkdir.entered)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    mkdir.proceed.set()
+    await wait_thread_event(mkdir.finished)
+
+    assert attempt.outcome is CommitOutcome.NOT_COMMITTED
+    assert replace_calls == []
+    assert not destination.exists()
+    assert temp.path.exists()
+
+
+async def test_cancel_during_replace_waits_for_thread_and_reports_committed(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, destination = await prepared(storage)
+    replace = block_replace(monkeypatch)
+    attempt = CommitAttempt()
+
+    task = asyncio.create_task(storage.commit_temp_file(temp, key, attempt))
+    await wait_thread_event(replace.entered)
+    task.cancel()
+    assert await still_running(task)  # KHÔNG kết thúc khi thread còn có thể đổi chỗ
+    replace.proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert attempt.outcome is CommitOutcome.COMMITTED
+    assert destination.read_bytes() == b"data"
+    assert not temp.path.exists()
+
+
+async def test_cancel_during_replace_that_fails_reports_not_committed(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, destination = await prepared(storage)
+    replace = block_replace(monkeypatch, PermissionError("file bị khóa (giả lập)"))
+    attempt = CommitAttempt()
+
+    task = asyncio.create_task(storage.commit_temp_file(temp, key, attempt))
+    await wait_thread_event(replace.entered)
+    task.cancel()
+    replace.proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert attempt.outcome is CommitOutcome.NOT_COMMITTED
+    assert not destination.exists()
+    assert temp.path.exists()
+
+
+async def test_second_cancel_while_waiting_for_thread_is_unknown(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, destination = await prepared(storage)
+    replace = block_replace(monkeypatch)
+    attempt = CommitAttempt()
+
+    task = asyncio.create_task(storage.commit_temp_file(temp, key, attempt))
+    await wait_thread_event(replace.entered)
+    task.cancel()
+    assert await still_running(task)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert attempt.outcome is CommitOutcome.UNKNOWN
+    replace.proceed.set()  # thread vẫn chạy tiếp và đổi chỗ SAU khi task đã kết thúc
+    await wait_thread_event(replace.finished)
+
+    assert destination.exists()  # đây là lý do UNKNOWN không bao giờ được trả quota
+
+
+async def test_destination_stat_error_after_cancel_is_unknown(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, destination = await prepared(storage)
+    replace = block_replace(monkeypatch, PermissionError("file bị khóa (giả lập)"))
+    attempt = CommitAttempt()
+    real_lstat = os.lstat
+
+    def failing_lstat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if os.fspath(path) == os.fspath(destination):
+            raise PermissionError("không đọc được trạng thái file (giả lập)")
+        return real_lstat(path, *args, **kwargs)
+
+    task = asyncio.create_task(storage.commit_temp_file(temp, key, attempt))
+    await wait_thread_event(replace.entered)
+    monkeypatch.setattr(os, "lstat", failing_lstat)
+    task.cancel()
+    replace.proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert attempt.outcome is CommitOutcome.UNKNOWN
+
+
+async def test_replace_error_without_cancel_raises_original_and_is_not_committed(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, destination = await prepared(storage)
+
+    def failing_replace(*_: object) -> None:
+        raise PermissionError("file bị khóa (giả lập)")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    attempt = CommitAttempt()
+    with pytest.raises(PermissionError):
+        await storage.commit_temp_file(temp, key, attempt)
+
+    assert attempt.outcome is CommitOutcome.NOT_COMMITTED
+    assert not destination.exists()
+
+
+async def test_replace_error_with_destination_present_is_unknown(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, _ = await prepared(storage)
+
+    def replace_then_fail(source: Any, target: Any) -> None:
+        Path(target).write_bytes(b"?")
+        raise PermissionError("lỗi sau khi file đích đã xuất hiện (giả lập)")
+
+    monkeypatch.setattr(os, "replace", replace_then_fail)
+    attempt = CommitAttempt()
+    with pytest.raises(PermissionError):
+        await storage.commit_temp_file(temp, key, attempt)
+
+    assert attempt.outcome is CommitOutcome.UNKNOWN
+
+
+@pytest.mark.parametrize("with_attempt", [True, False])
+async def test_successful_commit_reports_committed(
+    storage: LocalStorage, with_attempt: bool
+) -> None:
+    temp, key, destination = await prepared(storage)
+    attempt = CommitAttempt() if with_attempt else None
+
+    path = await storage.commit_temp_file(temp, key, attempt)
+
+    assert path == destination and destination.read_bytes() == b"data"
+    if attempt is not None:
+        assert attempt.outcome is CommitOutcome.COMMITTED
+
+
+async def test_original_cancellation_is_reraised_so_timeout_still_works(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, destination = await prepared(storage)
+    replace = block_replace(monkeypatch)
+    attempt = CommitAttempt()
+    release_thread = asyncio.get_running_loop().call_later(
+        STILL_RUNNING_PROBE_SECONDS * 2, replace.proceed.set
+    )
+
+    try:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(STILL_RUNNING_PROBE_SECONDS):
+                await storage.commit_temp_file(temp, key, attempt)
+    finally:
+        release_thread.cancel()
+        replace.proceed.set()
+
+    # asyncio.timeout chỉ đổi ĐÚNG CancelledError gốc thành TimeoutError → đã ném lại nguyên vẹn
+    assert attempt.outcome is CommitOutcome.COMMITTED
+    assert destination.exists()
+
+
+async def test_file_state_reports_present_absent_and_unknown(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, _ = await prepared(storage)
+    assert await storage.file_state(key) is FileState.ABSENT
+    await storage.commit_temp_file(temp, key)
+    assert await storage.file_state(key) is FileState.PRESENT
+
+    def failing_lstat(*_: object, **__: object) -> os.stat_result:
+        raise PermissionError("không đọc được (giả lập)")
+
+    monkeypatch.setattr(os, "lstat", failing_lstat)
+    assert await storage.file_state(key) is FileState.UNKNOWN
+
+
+async def test_second_cancel_while_confirming_destination_is_unknown(
+    storage: LocalStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temp, key, destination = await prepared(storage)
+    replace = block_replace(monkeypatch)
+    lstat = ThreadBlocker(
+        os.lstat, match=lambda path, *_: os.fspath(path) == os.fspath(destination)
+    )
+    attempt = CommitAttempt()
+
+    task = asyncio.create_task(storage.commit_temp_file(temp, key, attempt))
+    await wait_thread_event(replace.entered)
+    monkeypatch.setattr(os, "lstat", lstat)
+    task.cancel()
+    replace.proceed.set()
+    await wait_thread_event(lstat.entered)  # thread đã đổi chỗ xong, đang xác minh file đích
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    lstat.proceed.set()
+    await wait_thread_event(lstat.finished)
+
+    assert attempt.outcome is CommitOutcome.UNKNOWN

@@ -9,6 +9,9 @@ Bảo đảm an toàn:
 - Ghi vào `tmp/` rồi `os.replace` sang vị trí chính: `tmp/` nằm dưới cùng thư mục gốc (cùng ổ
   đĩa) nên thao tác đổi chỗ là nguyên tử — người đọc không bao giờ thấy file ghi dở.
 - Mọi thao tác đĩa chạy qua `asyncio.to_thread`, không chặn event loop.
+- Hủy coroutine KHÔNG dừng được thread đang chạy (P2-4.1): `commit_temp_file` vì vậy chờ thread
+  `os.replace` kết thúc trước khi ném lại `CancelledError` gốc, và báo kết quả thật qua
+  `CommitAttempt` để phía gọi quyết định có được hoàn hạn mức hay không.
 """
 
 import asyncio
@@ -62,10 +65,67 @@ class DeleteOutcome(StrEnum):
     FAILED = "failed"  # vẫn còn trên đĩa → KHÔNG giải phóng hạn mức (quyết định 7.7)
 
 
+class CommitOutcome(StrEnum):
+    """Kết quả THẬT của một lần đổi chỗ file tạm sang khóa đích."""
+
+    NOT_COMMITTED = "not_committed"  # chắc chắn chưa đổi chỗ, file đích không có
+    COMMITTED = "committed"  # chắc chắn đã đổi chỗ, file đích có
+    UNKNOWN = "unknown"  # không xác định được → phía gọi KHÔNG được hoàn hạn mức
+
+
+class FileState(StrEnum):
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNKNOWN = "unknown"  # không đọc được trạng thái (quyền, I/O…)
+
+
+@dataclass
+class CommitAttempt:
+    """Ghi lại kết quả của `commit_temp_file`, đọc được cả khi hàm ném lỗi hoặc bị hủy.
+
+    Cố ý KHÔNG dùng lớp con của `CancelledError` để mang kết quả: `asyncio.timeout()` so sánh
+    đúng kiểu `CancelledError`, nên phải ném lại chính đối tượng gốc.
+    """
+
+    outcome: CommitOutcome = CommitOutcome.NOT_COMMITTED
+
+
 @dataclass(frozen=True)
 class TempFile:
     path: Path
     size_bytes: int  # số byte thực đã ghi xuống đĩa, không phải kích thước client khai báo
+
+
+# Thread đổi chỗ có thể chạy tiếp sau khi coroutine gọi đã kết thúc (bị hủy hai lần): giữ tham
+# chiếu mạnh tới task tới khi xong (asyncio chỉ giữ tham chiếu yếu) và luôn đọc kết quả của nó
+_PENDING_REPLACES: set[asyncio.Task[None]] = set()
+
+
+def _keep_until_done(task: asyncio.Task[None]) -> None:
+    _PENDING_REPLACES.add(task)
+    task.add_done_callback(_forget_replace)
+
+
+def _forget_replace(task: asyncio.Task[None]) -> None:
+    _PENDING_REPLACES.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.debug("Đổi chỗ file tạm thất bại (%s)", type(task.exception()).__name__)
+
+
+def _path_state(path: Path) -> FileState:
+    try:
+        os.lstat(path)  # không theo symlink / junction
+    except FileNotFoundError:
+        return FileState.ABSENT
+    except OSError:
+        return FileState.UNKNOWN
+    return FileState.PRESENT
+
+
+def _confirmed(outcome: CommitOutcome, state: FileState) -> CommitOutcome:
+    """Đối chiếu kết quả của thread với trạng thái thật trên đĩa; lệch nhau → UNKNOWN."""
+    expected = FileState.PRESENT if outcome is CommitOutcome.COMMITTED else FileState.ABSENT
+    return outcome if state is expected else CommitOutcome.UNKNOWN
 
 
 def _open_new_file(path: Path) -> BinaryIO:
@@ -131,14 +191,62 @@ class LocalStorage:
         await asyncio.to_thread(handle.close)
         return TempFile(path=path, size_bytes=size_bytes)
 
-    async def commit_temp_file(self, temp: TempFile, key: str) -> Path:
-        """Chuyển file tạm sang vị trí của khóa (nguyên tử). Lỗi → file tạm vẫn còn để phía gọi
-        hoàn lại hạn mức rồi `discard_temp_file`."""
+    async def commit_temp_file(
+        self, temp: TempFile, key: str, attempt: CommitAttempt | None = None
+    ) -> Path:
+        """Chuyển file tạm sang vị trí của khóa (nguyên tử).
+
+        Kết quả thật luôn được ghi vào `attempt` (kể cả khi ném lỗi hoặc bị hủy):
+        - `os.replace` lỗi → ném lại lỗi gốc; `NOT_COMMITTED` (hoặc `UNKNOWN` nếu file đích lại tồn
+          tại / không đọc được trạng thái).
+        - Bị hủy trước khi thread đổi chỗ được tạo → `NOT_COMMITTED`.
+        - Bị hủy khi thread đang chạy → CHỜ thread kết thúc rồi mới ném lại `CancelledError` gốc;
+          `COMMITTED` / `NOT_COMMITTED` theo kết quả thread, đối chiếu với đĩa. Bị hủy lần nữa
+          khi đang chờ → `UNKNOWN` (thread có thể còn đổi chỗ sau đó).
+        Phía gọi chỉ được hoàn hạn mức khi kết quả là `NOT_COMMITTED`.
+        """
+        tracker = attempt if attempt is not None else CommitAttempt()
+        tracker.outcome = CommitOutcome.NOT_COMMITTED
         destination = self.path_for(key)
         self._require_temp_file(temp)
         await asyncio.to_thread(destination.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(os.replace, temp.path, destination)
+        replace_task = asyncio.create_task(asyncio.to_thread(os.replace, temp.path, destination))
+        _keep_until_done(replace_task)
+        tracker.outcome = CommitOutcome.UNKNOWN  # từ đây thread có thể đã đổi chỗ
+        try:
+            await asyncio.shield(replace_task)
+        except asyncio.CancelledError:
+            tracker.outcome = await self._settle_after_cancel(replace_task, destination)
+            raise
+        except OSError:
+            tracker.outcome = _confirmed(
+                CommitOutcome.NOT_COMMITTED, await asyncio.to_thread(_path_state, destination)
+            )
+            raise
+        tracker.outcome = CommitOutcome.COMMITTED
         return destination
+
+    async def _settle_after_cancel(
+        self, replace_task: asyncio.Task[None], destination: Path
+    ) -> CommitOutcome:
+        """Chờ thread đổi chỗ kết thúc (task bên trong được `shield` nên không bị hủy theo)."""
+        try:
+            await asyncio.shield(replace_task)
+        except asyncio.CancelledError:
+            return CommitOutcome.UNKNOWN  # bị hủy lần nữa khi đang chờ: thread có thể còn đổi chỗ
+        except OSError:
+            outcome = CommitOutcome.NOT_COMMITTED
+        else:
+            outcome = CommitOutcome.COMMITTED
+        try:
+            state = await asyncio.to_thread(_path_state, destination)
+        except asyncio.CancelledError:
+            return CommitOutcome.UNKNOWN
+        return _confirmed(outcome, state)
+
+    async def file_state(self, key: str) -> FileState:
+        """Trạng thái file của khóa trên đĩa (không theo liên kết); lỗi đọc → UNKNOWN."""
+        return await asyncio.to_thread(_path_state, self.path_for(key))
 
     async def discard_temp_file(self, temp: TempFile) -> None:
         self._require_temp_file(temp)

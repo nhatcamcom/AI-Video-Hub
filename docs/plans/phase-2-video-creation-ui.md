@@ -1,6 +1,6 @@
 # Kế hoạch Phase 2 — Video Creation UI
 
-Trạng thái: **các quyết định ở mục 7 đã được chủ dự án xác nhận (2026-11-14). Đã nghiệm thu P2-1, P2-2, P2-3, P2-4; P2-5 đã triển khai, chờ nghiệm thu; P2-6 trở đi chưa triển khai.** Trạng thái chi tiết từng bước ở mục 6.1–6.5. Mục 2 mô tả hiện trạng TRƯỚC khi bắt đầu Phase 2.
+Trạng thái: **các quyết định ở mục 7 đã được chủ dự án xác nhận (2026-11-14). Đã nghiệm thu P2-1 đến P2-6 và P2-4.1; P2-7 đã triển khai (mục 6.7), chờ nghiệm thu; P2-8 trở đi chưa triển khai.** Trạng thái chi tiết từng bước ở mục 6.1–6.7 và 6.4.1. Mục 2 mô tả hiện trạng TRƯỚC khi bắt đầu Phase 2.
 
 ## 1. Mục tiêu và phạm vi
 
@@ -64,6 +64,68 @@ storage/                    # đã git-ignore: uploads/, videos/, posters/
   - Cùng quy tắc áp dụng cho ảnh trong `media_assets` khi có thao tác xóa ảnh.
 - **Cleanup và đối soát:** lệnh CLI (tên đề xuất `python -m app.cli cleanup-storage`) thử xóa lại file của bản ghi đã xóa mềm, dọn file tạm của upload dở dang, và đối soát `used_bytes` với tổng `size_bytes` của các file còn được tham chiếu.
 
+### 4.2 Hợp đồng quota khi ghi file kết quả (P2-7) và khi xóa / đối soát (P2-8) — ĐÃ DUYỆT (2026-11-15), áp dụng khi triển khai P2-7/P2-8
+
+**P2-6 không giữ chỗ và không hoàn lại quota** (quyết định D1): `POST /videos` chỉ kiểm tra sớm `usage >= quota` → `409 storage_quota_exceeded`. Mọi thao tác `reserve`/`release` cho video nằm ở P2-7/P2-8 theo hợp đồng dưới đây.
+
+**Bất biến:**
+1. Chỉ `release` khi đã **chắc chắn** file mà lượt giữ chỗ đại diện (file tại `storage_key` ĐÍCH) không còn trên đĩa **và** không có bản ghi đã commit nào tham chiếu tới nó. File tạm trong `tmp/` không tính hạn mức (4.1).
+2. Không xác định chắc chắn được → **giữ nguyên file và quota**, ghi log khóa tương đối + "cần đối soát" (không ghi đường dẫn tuyệt đối, prompt hay dữ liệu cá nhân); P2-8 xử lý. Mọi sai lệch chỉ được phép theo hướng tính THỪA.
+3. Mỗi lượt giữ chỗ được trả **tối đa một lần**, ở đúng một nhánh code (cờ cục bộ `reserved_bytes`, đặt về 0 ngay sau khi `release` trả về).
+4. `asyncio.CancelledError` luôn được ném lại sau khi xử lý; phần dọn dẹp chạy trong `asyncio.shield` để một lần hủy nữa không cắt ngang giữa chừng.
+
+**Luồng ghi file kết quả của worker (P2-7)**, dùng lại 4 bước của P2-3:
+
+| Bước | Sự cố | File đích | Xử lý file | Quota | Job |
+|---|---|---|---|---|---|
+| 1. `write_temp_file` | lỗi / bị hủy | chưa có | `LocalStorage` tự xóa file dở | chưa giữ chỗ | `failed` (bị hủy: để lease xử lý) |
+| 2. `reserve(owner, byte thật)` | `StorageQuotaExceededError` | chưa có | `discard_temp_file` | không giữ được | `failed`, `error_code=storage_quota_exceeded` |
+| 2. `reserve` | bị hủy / lỗi khác | chưa có | `discard_temp_file` | **không xác định** (UPDATE có thể đã commit) → không `release`, P2-8 đối soát | để lease xử lý |
+| 3. `commit_temp_file` | xem "Hủy trong lúc đổi chỗ file" | | | | |
+| 4. Ghi kết quả vào `videos` | xem "Kết quả UPDATE/COMMIT không xác định" | | | | |
+
+**Hủy trong lúc đổi chỗ file (bước 3).** `os.replace` chạy trong thread (`asyncio.to_thread`); hủy coroutine KHÔNG dừng thread, nên bị hủy **không có nghĩa** file chưa được ghi. P2-7 cần một thao tác đổi chỗ trả về kết quả rõ ràng (`COMMITTED` / `NOT_COMMITTED` / `UNKNOWN`). Việc này thay đổi `app/core/storage.py`, phải được duyệt riêng ở P2-7:
+- Giữ tham chiếu tới future của thread và `await asyncio.shield(future)`.
+- **Hủy TRƯỚC khi thread `os.replace` được tạo** (ví dụ đang `mkdir`): chắc chắn chưa đổi chỗ → `NOT_COMMITTED`.
+- **Hủy TRONG lúc thread chạy:** chờ thread kết thúc (vẫn trong `shield`), rồi xét: `os.replace` ném lỗi → `NOT_COMMITTED`; trả về bình thường → `COMMITTED`. Bị hủy lần nữa khi đang chờ → `UNKNOWN`.
+- Sau đó luôn kiểm tra lại file đích trên đĩa (`path_for(key)`, `stat` không theo liên kết): `NOT_COMMITTED` mà file đích vẫn tồn tại, hoặc `stat` lỗi → nâng thành `UNKNOWN`.
+- Xử lý: `NOT_COMMITTED` + file đích không tồn tại → `release` một lần, `discard_temp_file`. `COMMITTED` → **tuyệt đối không `release`**; nếu coroutine đang bị hủy thì không ghi tiếp DB, giữ file + quota (thành orphan nếu không có bản ghi; P2-8 dọn). `UNKNOWN` → giữ file + quota, log "cần đối soát".
+- **Hủy SAU khi `os.replace` xong** (đang ở bước 4): file đã ở đích → theo quy tắc bước 4, không bao giờ `release` trước khi xác định chắc chắn.
+
+**Kết quả UPDATE/COMMIT không xác định (bước 4).** Ghi kết quả là CAS `UPDATE videos SET output_storage_key=:key, output_size_bytes=:size, status='succeeded', progress=100, active_slot=NULL, finished_at=:now WHERE id=:id AND status='processing'` (P2-7 bổ sung điều kiện lease) rồi `commit`. `execute` và `commit` đặt trong hai khối riêng để biết lỗi xảy ra ở đâu:
+- Lỗi khi `execute` (trước khi gửi COMMIT) → transaction chắc chắn không được commit → `rollback`, rồi **kiểm tra lại bằng session MỚI** (kết nối mới, transaction mới, chỉ đọc `status, output_storage_key` của video).
+- `rowcount == 0` (mất lease / video đã bị xóa) → `rollback`, kiểm tra lại bằng session mới.
+- Lỗi hoặc bị hủy khi `commit` → **kết quả không xác định** (COMMIT có thể đã thành công phía server) → `rollback` session cũ, kiểm tra lại bằng session mới.
+- Quy tắc sau khi kiểm tra lại:
+  - Video tham chiếu đúng `:key` (đã `succeeded`) → commit thực ra đã thành công → **giữ file và quota**, coi là thành công.
+  - Video KHÔNG tham chiếu `:key` và lỗi chắc chắn xảy ra trước COMMIT (lỗi `execute` hoặc `rowcount == 0`) → `storage.delete(key)`: `DELETED`/`NOT_FOUND` → `release` một lần; `FAILED` → giữ quota, log "cần đối soát".
+  - Video KHÔNG tham chiếu `:key` nhưng lỗi xảy ra ở COMMIT → vẫn coi là **không xác định** (server có thể chưa xử lý xong COMMIT cũ) → giữ file + quota, log "cần đối soát"; P2-8 quyết định sau thời gian an toàn.
+  - Không kiểm tra lại được (DB lỗi, bị hủy) → giữ file + quota.
+- Trạng thái job khi không xác định: worker không tự đổi; lease hết hạn (P2-7) xử lý tiếp, và cơ chế lease KHÔNG được xóa kết quả của job đã `succeeded`.
+
+**Xóa video (P2-8), không trả hai lần.** Xóa file trước (quyết định 7.7). `DELETED`/`NOT_FOUND` → CAS `UPDATE videos SET output_storage_key=NULL, output_size_bytes=NULL WHERE id=:id AND output_storage_key=:key`, rồi `StorageQuotaService(db).release(...)` trên CÙNG session (`release` tự commit → hai thay đổi commit nguyên tử). Chỉ request có `rowcount == 1` mới trả quota; hai request xóa đồng thời → một lần `release`. `FAILED` → không đổi DB, không trả quota (cleanup thử lại). Cùng quy tắc cho poster.
+
+**Đối soát và orphan file (P2-8, `cleanup-storage`):**
+- Dọn `tmp/` bằng `remove_stale_temp_files` (đã có, file quá 1 giờ).
+- Orphan trong `videos/`, `posters/`, `uploads/`: khóa không được bản ghi nào tham chiếu **và** cũ hơn thời gian an toàn (lớn hơn thời hạn lease của P2-7 + biên) → xóa. File còn mới thì để lại (có thể là commit chưa xác định).
+- Đối soát `used_bytes` = tổng `size_bytes` của file còn được tham chiếu và còn tồn tại (`media_assets` chưa xóa, `videos.output_*`, `videos.poster_*`), ghi bằng `StorageQuotaService.set_used()`. Bỏ qua user đang có job `processing` để không trừ phần worker vừa giữ chỗ nhưng chưa ghi vào `videos`.
+
+**Test bắt buộc ở P2-7/P2-8** (đếm số lần gọi `release` và `storage.delete` bằng spy trong mọi trường hợp):
+- Hủy TRƯỚC `os.replace` (chặn `mkdir` bằng `threading.Event`, hủy task) → `release` đúng 1 lần, file tạm bị xóa, `CancelledError` được ném lại.
+- Hủy TRONG `os.replace` (chặn `os.replace` trong thread, hủy task, rồi cho thread chạy tiếp và đổi chỗ thành công) → file đích tồn tại, **`release` 0 lần**, file được giữ.
+- Hủy TRONG `os.replace`, thread sau đó ném lỗi → file đích không có → `release` đúng 1 lần.
+- Hủy lần hai khi đang chờ thread → `UNKNOWN` → `release` 0 lần, log "cần đối soát".
+- `stat` file đích lỗi → `release` 0 lần.
+- Hủy SAU `os.replace` (đang ghi DB) → `release` 0 lần, file được giữ.
+- **Commit thật sự thành công nhưng worker nhận exception** (bọc `commit` thật rồi ném `ConnectionError`) → session mới thấy video `succeeded` tham chiếu `:key` → `storage.delete` 0 lần, `release` 0 lần, file còn và đọc được.
+- Commit ném lỗi mà không commit → giữ file + quota (không xác định), log "cần đối soát".
+- `execute` lỗi trước COMMIT, hoặc `rowcount == 0` → `delete` 1 lần, `release` 1 lần; `delete` trả `FAILED` → `release` 0 lần.
+- Kiểm tra lại bằng session mới cũng lỗi → giữ file + quota.
+- Xóa video đồng thời hai lần → `release` đúng 1 lần.
+- Orphan cũ hơn thời gian an toàn bị xóa và đối soát đúng; orphan còn mới và file đang được tham chiếu không bị xóa.
+
+**Phát hiện trên code P2-4 đã nghiệm thu → ĐÃ SỬA ở P2-4.1 (mục 6.4.1):** `MediaService._store_image` từng (1) hoàn hạn mức ngay khi `commit_temp_file` bị hủy trong lúc `os.replace` còn chạy (tính THIẾU + file mồ côi) và (2) xóa file + hoàn hạn mức khi COMMIT `media_assets` lỗi dù COMMIT có thể đã thành công. Cả hai đã được tái hiện bằng test (RED) rồi sửa theo hợp đồng này.
+
 ## 5. API (dưới `/api/v1`, mọi endpoint yêu cầu đăng nhập trừ khi ghi khác)
 
 | Method | Đường dẫn | Kết quả |
@@ -93,7 +155,7 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 | P2-3 | `core/storage.py` (LocalStorage) + `storage_root` / hạn mức 1 GB/user (4.1) + `user_storage_usage` + migration 0004 | Xem chi tiết ở 6.3 |
 | P2-4 | Upload ảnh (`POST /media/images`, `GET /media/images/{id}`, `GET /media/images/{id}/content`) + `media_assets` + migration 0005; Pillow 13.0.0 + python-multipart 0.0.33 | Xem chi tiết ở 6.4 |
 | P2-5 | Danh mục model (`catalog.py`) + `GET /video-models` | Xem chi tiết ở 6.5 |
-| P2-6 | `videos` + migration 0006 + `POST /videos` | Validate tỷ lệ/thời lượng theo khả năng của model; ảnh đầu vào phải thuộc người tạo; giới hạn job đang chạy mỗi user; `202` + `Location`; hạn mức tạo theo user (dùng lại `AccountThrottle`) |
+| P2-6 | `videos` + migration 0006 + `POST /videos` + `GET /videos/{id}` | Xem chi tiết ở 6.6 |
 | P2-7 | Worker + MockProvider (`python -m app.worker`, tiến trình riêng) | Hai worker không lấy trùng job (test đồng thời); job kẹt ở `processing` khi worker chết được xử lý lại theo thời hạn; chuyển trạng thái đúng; đường dẫn file mẫu cấu hình được, thiếu file mẫu → `failed` + thông báo rõ (test dùng file giả, không cần MP4 thật); lỗi provider → `failed` + `error_code` an toàn; không gọi API AI thật; server chạy được khi không có worker và ngược lại |
 | P2-8 | API đọc: list (cursor), detail, content (Range, download), poster, delete + lệnh cleanup/đối soát lưu trữ | Chỉ chủ sở hữu; cursor ổn định; Range trả `206`; test IDOR; xóa file thành công → `used_bytes` giảm đúng; xóa file thất bại → `used_bytes` không đổi và cleanup xử lý lại được; đối soát sửa được sai lệch |
 | P2-9 | UI Dashboard | Video gần đây, nút tạo mới; đủ trạng thái loading/empty/error |
@@ -210,7 +272,19 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 - **Thứ tự xử lý upload (sửa khi rà soát trước nghiệm thu, đã duyệt):** nếu endpoint khai báo tham số `File`, FastAPI parse toàn bộ multipart (tới 11 MiB, ghi file tạm khi > 1 MB) TRƯỚC mọi dependency, nên request chưa đăng nhập vẫn làm server đọc và ghi tạm cả body. Endpoint nay nhận `Request`: `CurrentUserDep` (session + CSRF) → rate limit IP → `MediaService.reserve_upload_rate_limit` → `request.form(max_files=1, max_fields=0)`. Request bị từ chối ở các bước đầu: app đọc 0 byte body. Hành vi thay đổi: 2 file hoặc field văn bản thừa → `400 http_error`. Response `422` khi thiếu file và schema OpenAPI multipart giữ nguyên (schema nay viết inline qua `openapi_extra`, không còn component tự sinh `Body_upload_image_...`).
 - Migration `0005` (`down_revision="0004"`): bảng `media_assets`, index `(owner_id, created_at)` (phục vụ cả khóa ngoại), `storage_key` unique, CHECK `content_type`, `size_bytes`, `width`, `height` > 0.
 
-### 6.5 Chi tiết P2-5 — Danh mục model video (đã duyệt 2026-11-15; đã triển khai, chờ nghiệm thu)
+### 6.4.1 Chi tiết P2-4.1 — An toàn commit file và quota trước cancellation (đã duyệt E1–E6 2026-11-15; đã triển khai và nghiệm thu 2026-11-15)
+
+**Nguyên nhân (đã tái hiện bằng test RED trên code cũ):** hủy coroutine đang chờ `asyncio.to_thread` không dừng thread → `os.replace` vẫn có thể đặt file vào `uploads/` sau khi code cũ đã hoàn hạn mức; aiosqlite chạy COMMIT trong thread và PostgreSQL có thể mất kết nối giữa COMMIT → code cũ xóa file + hoàn hạn mức dù bản ghi đã commit.
+
+**Đã sửa:**
+- `app/core/storage.py`: `CommitOutcome` (`NOT_COMMITTED` / `COMMITTED` / `UNKNOWN`), `CommitAttempt`, `FileState`, `file_state(key)`. `commit_temp_file(temp, key, attempt=None)` (chữ ký cũ vẫn dùng được): hủy trước khi tạo thread → `NOT_COMMITTED`; hủy khi thread chạy → chờ thread xong (shield) rồi ném lại ĐÚNG `CancelledError` gốc; hủy lần nữa khi đang chờ → `UNKNOWN`; luôn đối chiếu với `lstat` file đích, lệch → `UNKNOWN`. Không dùng lớp con của `CancelledError` vì `asyncio.timeout()` so sánh đúng kiểu (`asyncio/timeouts.py` Python 3.12). Task đổi chỗ được giữ tham chiếu tới khi xong.
+- `app/modules/media/service.py`: thao tác lưu chạy trên session RIÊNG (`session_factory`, E3); sha256 tính trước khi giữ chỗ; tách `_insert_asset` (add + flush) khỏi `_commit_asset` (E4). Mỗi giai đoạn có một kế hoạch dọn dẹp: giữ chỗ bị gián đoạn → không hoàn; đổi chỗ → chỉ hoàn khi `NOT_COMMITTED`; lỗi trước COMMIT → rollback, xóa, chỉ hoàn khi `file_state` xác nhận `ABSENT`; lỗi / hủy khi COMMIT → không xóa, không hoàn; lỗi thường thì kiểm tra lại bằng session mới theo đúng `owner_id` + `storage_key`, thấy bản ghi → trả 201 (E2).
+- Dọn dẹp (E5 + điều kiện bổ sung): ĐÚNG MỘT task cho mỗi lần lỗi, được giữ tham chiếu (`pending_cleanups()`), sở hữu session lưu và tự đóng nó khi xong. Bị hủy lần hai trong lúc chờ: phía ngoài ném `CancelledError` ngay (không giả định `shield` làm phía ngoài chờ), task chạy tiếp tới hết — không gọi lại bước nào, không tạo task trùng, không hoàn hạn mức lần hai, không đóng session khi task còn dùng. Bước nào bị gián đoạn (kể cả chính task bị hủy) → không thử lại, không hoàn, log "cần đối soát".
+- `app/modules/media/router.py`: `get_media_service` truyền `SessionFactoryDep`.
+
+**Hành vi đã biết:** hủy lần hai khi `os.replace` còn chạy → khối `finally` xóa file tạm trước khi thread chạy tiếp, nên thường đổi chỗ thất bại (không có orphan); hạn mức vẫn giữ (tính THỪA) cho tới khi đối soát ở P2-8.
+
+### 6.5 Chi tiết P2-5 — Danh mục model video (đã duyệt 2026-11-15; đã triển khai và nghiệm thu 2026-11-15)
 
 **Quyết định của chủ dự án (D1–D10 và 4 điều kiện):**
 - Phạm vi: chỉ danh mục model + `GET /video-models`. `providers/`, `VideoProvider`, `MockProvider` để sang P2-7. Không DB, không migration, không dependency mới.
@@ -221,6 +295,72 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 - `GET /api/v1/video-models`: `CurrentUserDep`; `{"total", "items"}`; chỉ model đang bật, đúng thứ tự cấu hình; đúng 6 trường `key`, `display_name`, `is_demo`, `aspect_ratios`, `durations_seconds`, `supports_input_image`; `401` khi chưa đăng nhập; POST/PATCH/PUT/DELETE → `405`. Không rate limit riêng (dữ liệu tĩnh, không truy vấn DB).
 
 **Dùng ở bước sau:** P2-6 kiểm tra `POST /videos` bằng `get_enabled(key)` + `spec.supports(...)`; P2-8 hiển thị video cũ bằng `get_known(key)`; worker (P2-7) tự dựng danh mục từ `Settings`. Server và worker phải dùng cùng `ENABLED_VIDEO_MODELS` (P2-7 quyết định cách xử lý job của model đã tắt).
+
+### 6.6 Chi tiết P2-6 — API tạo video (đã duyệt 2026-11-15; đã triển khai và nghiệm thu 2026-11-15)
+
+**Quyết định của chủ dự án (D1–D11 + bổ sung IntegrityError và hợp đồng quota 4.2):**
+- D1: không giữ chỗ quota khi tạo job; chỉ kiểm tra sớm `usage >= quota` → `409 storage_quota_exceeded`. Worker giữ chỗ theo byte thật ở P2-7 (hợp đồng 4.2).
+- D2: `queued` và `processing` đều chiếm slot. D3: `active_slot` (1, 2) + UNIQUE `uq_videos_owner_id_active_slot` + CHECK slot ⇔ trạng thái đang chạy. D4: có `GET /videos/{id}`; danh sách, nội dung, poster, xóa ở P2-8.
+- D5: 60 lượt/IP/giờ (in-memory, `VIDEO_CAPACITY_SHARES` 6/2/2 gộp vào `APP_CAPACITY_SHARES`) và 30 lượt/user/giờ (`AccountThrottle`); lượt bị từ chối vẫn bị tính.
+- D6: ảnh không tồn tại / của người khác / đã xóa → cùng `422 input_image_not_found`. D7: dùng lại `MediaService.get_image()`, không sửa media. D8: lease để P2-7 (migration 0007). D9: chưa có `Idempotency-Key` — request gửi lại có thể tạo job trùng (chặn một phần bởi giới hạn 2 job, rate limit; P2-10 chặn submit hai lần). D10: prompt bỏ khoảng trắng hai đầu, 1–1.000 code point, từ chối C0 trừ `\n\r\t`, CHECK độ dài ở DB, không ghi log. D11: phạm vi file như kế hoạch.
+
+**Đã xây:**
+- `app/modules/videos/models.py`: `Video`, `VideoStatus`; CHECK dựng từ hằng số của catalog (ORM luôn khớp code), migration `0006` ghi cố định cùng giá trị. CHECK cặp file (`output_*`, `poster_*`) dùng `IS NOT NULL AND size > 0` vì `NULL > 0` là NULL và CHECK coi NULL là đạt (test ràng buộc phát hiện khi triển khai).
+- `app/modules/videos/service.py`: thứ tự kiểm tra model → tùy chọn → ảnh → hạn mức → chọn slot + INSERT. `classify_integrity_error`: SQLite theo `sqlite_errorname` + thông điệp khớp nguyên văn `UNIQUE constraint failed: videos.owner_id, videos.active_slot`; PostgreSQL theo `sqlstate` (`23505`, `23503`) + `constraint_name` của lỗi asyncpg. Chỉ `ACTIVE_SLOT_CONFLICT` được thử lại (tối đa 3 lần, rollback trước mỗi lần); lỗi FK → rollback rồi đọc lại ảnh (ảnh đã mất → 422, còn ảnh → ném lại = 500); lỗi khác → ném lại (500); hết 3 lần dù vẫn báo còn slot → 500. Không lỗi nào bị đổi thành 409.
+- `app/modules/videos/router.py`: `POST /videos` (`202` + `Location`), `GET /videos/{id}`; `schemas.py`: `VideoCreate` (`StrictRequest`), `VideoResponse` (không có storage key, kích thước file, slot).
+- Trạng thái: `queued → processing → succeeded | failed` (P2-7), chuyển trạng thái bằng CAS, câu chuyển sang trạng thái kết thúc trả `active_slot = NULL`.
+
+**Kiểm thử đáng chú ý:** race tất định (`asyncio.Barrier`, hai request cùng đọc slot 1 → một request thử lại và nhận slot 2; kiểm thử đột biến tắt retry → test fail `[500, 202]`); 10 request đồng thời trên file SQLite thật → đúng 2 job (test này không tự gây va chạm trên SQLite, nên bằng chứng retry là test race tất định); ảnh bị xóa cứng giữa kiểm tra và INSERT → 422, không retry; user bị xóa giữa chừng → 500; vi phạm CHECK → 500; lỗi SQLite THẬT và lớp lỗi asyncpg thật của SQLAlchemy (bọc lỗi driver giả) cho bộ phân loại.
+
+**Giới hạn đã chấp nhận:** PostgreSQL chưa được kiểm thử trên server thật (chưa cài asyncpg, chưa có server) — nhánh PostgreSQL của bộ phân loại chỉ được kiểm bằng lỗi driver giả; DDL `0006` đã kiểm offline bằng `alembic upgrade --sql`.
+
+### 6.7 Kế hoạch P2-7 — Video Worker (kế hoạch đã duyệt 2026-11-15; đã triển khai, chờ nghiệm thu)
+
+**Quyết định W1–W13 (đã duyệt):**
+
+| # | Quyết định |
+|---|---|
+| W1 | Giữ trạng thái `succeeded` (không đổi sang `completed`) |
+| W2 | Migration `0007`, `down_revision = "0006"`: `lease_token` String(32) NULL, `lease_expires_at` timestamptz NULL, `attempt_count` SmallInteger NOT NULL default 0 (CHECK ≥ 0), `next_attempt_at` timestamptz NULL; CHECK `ck_videos_lease_matches_status` (`processing` ⇔ có `lease_token` và `lease_expires_at`); index `(status, lease_expires_at)`; SQLite dùng `batch_alter_table`; không tự sửa dữ liệu |
+| W3 | Claim bằng CAS. SQLite: một câu UPDATE có điều kiện (subquery + `AND status='queued'`). PostgreSQL: transaction `SELECT … FOR UPDATE SKIP LOCKED` rồi UPDATE lease trong cùng transaction. `attempt_count` chỉ tăng khi claim thành công. 1 job mỗi tiến trình |
+| W4 | Lease 60 giây; heartbeat 10 giây là task riêng, độc lập với provider; poll 2 giây + jitter; tối đa 3 lần thử; backoff 15 giây × số lần thử |
+| W5 | Chỉ lỗi "tạm thời" mới thử lại khi còn lượt (`OperationalError`, `TimeoutError`, `OSError` errno EAGAIN/EBUSY/EIO); lỗi lập trình và dữ liệu không hợp lệ → `failed` ngay |
+| W6 | Model bị tắt hoặc ảnh đầu vào không còn khi nhận job → `failed` (`video_model_unavailable` / `input_image_unavailable`) |
+| W7 | Mock: `MOCK_SAMPLE_VIDEO_PATH` (thiếu → job `failed` `mock_sample_missing`), `MOCK_PROCESSING_SECONDS=5`, `MOCK_FORCE_FAILURE=false` (từ chối `true` ở production), `VIDEO_OUTPUT_MAX_BYTES=100 MiB`, kiểm tra MP4 bằng `data[4:8] == b"ftyp"` |
+| W8 | Registry task nền dùng chung trong mỗi tiến trình (`app/core/background_tasks.py`); media chuyển sang dùng, giữ `pending_cleanups()` |
+| W9 | Lưu đầu ra trong `app/modules/videos/output.py` theo hợp đồng 4.2, không refactor luồng lưu của media |
+| W10 | Dừng web: uvicorn `timeout_graceful_shutdown=20`; `lifespan` gọi `shutdown_background` (dưới đây) |
+| W11 | Dừng worker: tín hiệu 1 → ngừng claim, chờ job ≤ 30 giây; quá hạn hoặc tín hiệu 2 → hủy job theo giai đoạn; rồi `shutdown_background`. `signal.signal` + `call_soon_threadsafe` (Windows không hỗ trợ `add_signal_handler`); SIGBREAK chỉ đăng ký khi `hasattr(signal, "SIGBREAK")` |
+| W12 | Hủy có kiểm soát ở giai đoạn provider → requeue, không tính lượt thử (CAS có điều kiện, xem dưới) |
+| W13 | Phạm vi file như danh sách dưới |
+
+**`shutdown_background(registry, engine)` — dùng chung cho web và worker:**
+1. Ngừng nhận việc mới (web: uvicorn ngừng nhận kết nối, hủy request quá `timeout_graceful_shutdown`; worker: cờ `stopping`).
+2. Drain registry trong `SHUTDOWN_DRAIN_SECONDS` = 10 giây. Mỗi vòng lấy lại bản chụp `pending()` rồi `asyncio.wait(timeout=còn lại)`, nên task mới phát sinh trong lúc drain cũng được theo dõi. Registry chỉ bỏ một task qua `done_callback` sau khi task kết thúc; drain không bao giờ tự bỏ tham chiếu.
+3. Hết hạn mà còn task → `cancel()` các task còn lại.
+4. Drain lần hai trong `SHUTDOWN_CANCEL_GRACE_SECONDS` = 5 giây.
+5. Vẫn còn task sống → log **critical** (số task, bước đang làm; không prompt, không đường dẫn tuyệt đối), registry **vẫn giữ tham chiếu**, **không `engine.dispose()`** khi task còn có khả năng dùng session hoặc connection.
+6. Không còn task nào → mới `engine.dispose()` (web: sau `image_gate.close()`).
+7. **Không bao giờ trả quota hay xóa file chỉ để kịp dừng.** Task bị hủy giữa chừng đi theo nhánh "dọn dẹp bị gián đoạn" của P2-4.1: không thử lại bước nào, không trả quota, log "cần đối soát".
+
+**Không task nào được nuốt `CancelledError` vô hạn:** mọi task nền (dọn dẹp, requeue, heartbeat) khi bị hủy chỉ làm các bước có giới hạn trong `except`/`finally` (ghi log, `session.close()`), rồi **luôn ném lại** `CancelledError`. Không có vòng lặp bắt `CancelledError` để chạy tiếp.
+
+**Khi event loop đóng (sau khi hàm chính trả về) và thời gian dừng:** các bước có thời hạn của chúng ta tối đa khoảng 45 giây (chờ job 30 + drain 10 + grace 5). **Đây không phải tổng thời gian tiến trình kết thúc.** Sau đó `asyncio.run` còn (a) hủy mọi task còn chờ và **chờ chúng kết thúc** (`gather(..., return_exceptions=True)`, task dọn dẹp ghi log rồi đóng session), (b) `shutdown_default_executor()` chờ các thread `to_thread` (`os.replace`, `unlink`, `lstat`) chạy xong — Python 3.12 cho phép tới 300 giây, (c) đóng loop. Thời gian thực tế vì vậy có thể dài hơn 45 hoặc 60 giây. Kết nối chưa được dispose sẽ đóng khi tiến trình thoát; database rollback phần chưa commit, nên quota chỉ có thể bị tính THỪA.
+
+**Thời hạn supervisor:** 60 giây là thời hạn **dự kiến** đặt cho supervisor (Docker `stop_grace_period`, systemd `TimeoutStopSec`). Nếu tiến trình bị SIGKILL (hết thời hạn supervisor, hoặc `TerminateProcess` trên Windows) thì xử lý như **worker chết đột ngột**: lease hết hạn → reaper đưa job về `queued` (còn lượt, có tính lượt thử) hoặc `failed` `processing_timeout`; orphan file và quota tính thừa do P2-8 xử lý.
+
+**Hủy theo giai đoạn** (ranh giới: giai đoạn output bắt đầu ngay trước `reserve`):
+- *Provider (chưa lưu output):* xóa file tạm của provider. Dừng có kiểm soát → task requeue do registry theo dõi, session riêng: `UPDATE videos SET status='queued', lease_token=NULL, lease_expires_at=NULL, attempt_count=attempt_count-1, next_attempt_at=NULL WHERE id=:id AND status='processing' AND lease_token=:t AND output_storage_key IS NULL AND attempt_count > 0`. `rowcount 0` / lỗi / bị hủy → không làm gì thêm, reaper xử lý khi hết lease (có tính lượt thử). `lease_lost` → không requeue.
+- *Output (từ `reserve` trở đi):* KHÔNG requeue. Xử lý theo hợp đồng 4.2 bằng `CommitAttempt`, `FileState`, quota và kết quả COMMIT; không xác định → giữ file + quota, log "cần đối soát". Job giữ `processing` cho tới khi reaper xử lý; reaper không đụng job đã `succeeded`.
+- *Mất lease:* heartbeat CAS `rowcount 0` → `lease_lost`, hủy provider; kiểm tra `lease_lost` trước `reserve`. Mọi CAS kết thúc job (`succeeded` / `failed` / `queued`) đều có `AND status='processing' AND lease_token=:t`, nên worker mất lease không thể ghi `succeeded`; nếu mất lease khi đang lưu, CAS kết thúc `rowcount 0` → chắc chắn chưa commit → xóa file, xác nhận `ABSENT`, trả quota đúng 1 lần.
+
+**File dự kiến:** mới — `app/worker.py`, `app/core/background_tasks.py`, `app/modules/videos/{jobs,heartbeat,output,runner}.py`, `app/modules/videos/providers/{__init__,base,mock,registry}.py`, migration `0007`. Sửa — `app/modules/videos/models.py`, `app/core/config.py` (mock, worker, shutdown; validator heartbeat < lease/2), `app/main.py` (`lifespan`), `app/server.py` (`timeout_graceful_shutdown`), `app/modules/media/service.py` (chỉ chuyển sang registry), `.env.example`, `README.md`, `CLAUDE.md`, kế hoạch. Không sửa auth, users, quota, logic upload ảnh; không thêm dependency.
+
+**Test dự kiến (TDD):** registry (task mới trong lúc drain, không bỏ tham chiếu, tự gỡ khi xong); shutdown đường bình thường (dispose SAU drain) và còn task sống (log critical, `engine.dispose` không được gọi, tham chiếu còn); **task giả cố ý trì hoãn kết thúc** chờ một `asyncio.Event` giải phóng — test luôn đặt event trong `finally`, chờ task bằng `asyncio.wait_for(…, timeout)` và fixture kiểm tra registry rỗng sau test, nên test không thể treo; đóng event loop bằng subprocess (task nhận cancel, log "cần đối soát", `release` 0 lần, session đóng); web `lifespan` qua `app.router.lifespan_context(app)`; claim đồng thời nhiều engine (race tất định + kiểm thử đột biến), N job × M worker; SQL PostgreSQL compile có `FOR UPDATE SKIP LOCKED` (không có server); heartbeat độc lập (provider bị chặn, đồng hồ tiêm); mất lease; reaper; retry còn / hết lượt, lỗi lập trình `failed` ngay; hủy giai đoạn provider (CAS đủ điều kiện / sai điều kiện) và output (danh sách test hợp đồng 4.2, đếm `release`/`delete`); dừng worker (job xong trong hạn, quá hạn, tín hiệu 2, SIGBREAK có điều kiện); tiến trình thật `python -m app.worker` (`CTRL_BREAK_EVENT`, `terminate()` rồi lượt 2 hoàn tất); mock (`ftyp`, file < 8 byte, thiếu, thư mục, quá kích thước, `MOCK_FORCE_FAILURE`); migration `0007` trên DB tạm (head, `down_revision == "0006"`, CHECK, index, DDL PostgreSQL offline); chạy lặp 20 lần bộ test hủy / dừng / lease; regression P2-3 → P2-6.
+
+**Rủi ro còn lại:** không dispose khi còn task sống (kết nối đóng khi tiến trình thoát, chỉ tính thừa); `shutdown_default_executor` có thể chờ tới 300 giây nếu thread I/O treo; SIGKILL từ supervisor → như worker chết (lease + P2-8); nhánh PostgreSQL chưa chạy trên server thật; SQLite nhiều tiến trình có thể `database is locked` (thử lại; khuyến nghị 1 worker); đồng hồ lệch nhiều máy (cần NTP); orphan và quota tính thừa cho tới P2-8; test phụ thuộc thời gian (đồng hồ tiêm, event có timeout, chạy lặp 20 lần).
+
+**Ghi chú khi triển khai (2026-11-15):** `app/server.py` lấy `timeout_graceful_shutdown` từ `SERVER_GRACEFUL_SHUTDOWN_SECONDS` (mặc định 20). Cần đặt `PYTHONIOENCODING=utf-8` cho worker chạy trên console Windows để log tiếng Việt không bị đổi thành mã thoát. Hủy lần hai khi `os.replace` còn chạy ở giai đoạn lưu kết quả: khối `finally` xóa file tạm trước, nên thường không có orphan; hạn mức giữ (tính thừa) cho tới đối soát P2-8.
 
 ## 7. Quyết định đã được chủ dự án xác nhận (2026-11-14)
 

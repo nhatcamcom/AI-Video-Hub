@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
 from starlette.datastructures import UploadFile
 
-from app.core.database import DbDep
+from app.core.database import DbDep, SessionFactoryDep
 from app.core.dependencies import (
     RateLimiterDep,
     RateLimitSubjectDep,
@@ -101,8 +101,9 @@ def get_media_service(
     storage: StorageDep,
     gate: Annotated[ImageProcessingGate, Depends(get_image_gate)],
     settings: SettingsDep,
+    session_factory: SessionFactoryDep,
 ) -> MediaService:
-    return MediaService(db, storage, gate, settings)
+    return MediaService(db, storage, gate, settings, session_factory)
 
 
 MediaServiceDep = Annotated[MediaService, Depends(get_media_service)]

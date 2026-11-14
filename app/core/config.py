@@ -30,6 +30,8 @@ MEBIBYTE = 1024 * 1024
 DEFAULT_IMAGE_UPLOAD_MAX_BYTES = 10 * MEBIBYTE  # 10.485.760 byte (P2-4)
 # Ảnh 10 MiB + phần đầu/cuối của multipart; áp cho MỌI request (body JSON hiện tại rất nhỏ)
 DEFAULT_MAX_REQUEST_BODY_BYTES = 11 * MEBIBYTE
+DEFAULT_VIDEO_OUTPUT_MAX_BYTES = 100 * MEBIBYTE  # P2-7: video đầu ra lớn nhất worker chấp nhận
+HEARTBEAT_LEASE_RATIO = 2  # heartbeat phải < lease / 2 → mất một nhịp vẫn chưa hết lease
 # Định dạng key model video (P2-5), dùng chung với danh mục app/modules/videos/catalog.py
 VIDEO_MODEL_KEY_PATTERN = r"[a-z0-9][a-z0-9-]{0,31}"
 _VIDEO_MODEL_KEY_REGEX = re.compile(VIDEO_MODEL_KEY_PATTERN)
@@ -108,6 +110,29 @@ class Settings(BaseSettings):
     # Tổng body của MỌI request, đếm khi đang nhận (không tin Content-Length) → 413
     max_request_body_bytes: int = Field(default=DEFAULT_MAX_REQUEST_BODY_BYTES, gt=0)
 
+    # --- Worker tạo video (P2-7) — tiến trình riêng `python -m app.worker` ---
+    worker_poll_seconds: float = Field(default=2.0, gt=0, le=60)  # chờ khi hàng đợi rỗng (+ jitter)
+    worker_lease_seconds: int = Field(default=60, ge=5, le=3600)  # job không được gia hạn → reaper
+    worker_heartbeat_seconds: float = Field(default=10.0, gt=0, le=1800)  # phải < lease / 2
+    worker_max_attempts: int = Field(default=3, ge=1, le=10)
+    worker_retry_backoff_seconds: int = Field(default=15, ge=0, le=3600)  # nhân với số lần đã thử
+    # Chờ job đang chạy khi nhận tín hiệu dừng; quá hạn → hủy job theo giai đoạn
+    worker_shutdown_grace_seconds: float = Field(default=30.0, ge=0, le=600)
+
+    # --- Dừng an toàn (P2-7, web + worker) ---
+    # Chờ task dọn dẹp nền; còn task → hủy rồi chờ thêm. Vẫn còn task sống → KHÔNG dispose engine.
+    # Đây chỉ là thời hạn của các bước này, không phải tổng thời gian tiến trình kết thúc
+    shutdown_drain_seconds: float = Field(default=10.0, ge=0, le=600)
+    shutdown_cancel_grace_seconds: float = Field(default=5.0, ge=0, le=600)
+    server_graceful_shutdown_seconds: int = Field(default=20, ge=1, le=600)  # uvicorn
+
+    # --- Mock provider (P2-7) — bản demo, KHÔNG phải AI thật ---
+    # File MP4 mẫu do chủ dự án cung cấp (không commit). Trống → job thất bại `mock_sample_missing`
+    mock_sample_video_path: str | None = None
+    mock_processing_seconds: float = Field(default=5.0, ge=0, le=300)  # tiến độ giả lập
+    mock_force_failure: bool = False  # chỉ để thử giao diện lỗi; bị từ chối ở production
+    video_output_max_bytes: int = Field(default=DEFAULT_VIDEO_OUTPUT_MAX_BYTES, gt=0)
+
     # --- Reverse proxy ---
     # Rỗng = không có proxy: X-Forwarded-For bị bỏ qua. Có proxy: chỉ khai báo đúng IP/CIDR của
     # proxy (JSON, ví dụ ["10.0.0.5"]). Wildcard ("*", 0.0.0.0/0, ::/0) bị từ chối.
@@ -156,6 +181,16 @@ class Settings(BaseSettings):
     @cached_property
     def storage_root_path(self) -> Path:
         return resolve_storage_root(self.storage_root)
+
+    @cached_property
+    def mock_sample_video_file(self) -> Path | None:
+        """File MP4 mẫu (đường dẫn tương đối tính từ thư mục dự án); không kiểm tra tồn tại ở đây:
+        thiếu file chỉ làm job thất bại rõ ràng (`mock_sample_missing`), không chặn app khởi
+        động."""
+        if not self.mock_sample_video_path:
+            return None
+        candidate = Path(self.mock_sample_video_path)
+        return candidate if candidate.is_absolute() else (PROJECT_ROOT / candidate).resolve()
 
     @field_validator("public_base_url")
     @classmethod
@@ -215,6 +250,13 @@ class Settings(BaseSettings):
                 "allowed_origins không được chứa '*' khi allow_credentials=True "
                 "(trình duyệt sẽ gửi cookie tới mọi origin)"
             )
+        if self.worker_heartbeat_seconds * HEARTBEAT_LEASE_RATIO >= self.worker_lease_seconds:
+            raise ValueError(
+                "worker_heartbeat_seconds phải nhỏ hơn worker_lease_seconds / 2 "
+                "(lỡ một nhịp heartbeat vẫn chưa mất lease)"
+            )
+        if self.is_production and self.mock_force_failure:
+            raise ValueError("mock_force_failure không được bật khi APP_ENV=production")
         if self.is_hardened:
             self._reject_unsafe_hardened_settings()
         return self

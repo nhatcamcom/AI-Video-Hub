@@ -13,7 +13,7 @@ from app.main import create_app
 
 IN_MEMORY_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
-SettingValue = str | bool | int | list[str]
+SettingValue = str | bool | int | float | list[str]
 # Khóa HMAC giả cho test (staging/production bắt buộc có khóa ≥ 32 ký tự)
 TEST_THROTTLE_KEY = "test-only-throttle-key-0123456789abcdef"
 

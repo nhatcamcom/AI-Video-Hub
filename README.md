@@ -12,7 +12,7 @@ Website **AI Video SaaS**: người dùng mua **credit trả trước** để t�
 |---|---|---|
 | 0 | Nền móng: khung app, config, DB, health, xử lý lỗi, công cụ kiểm tra | **Hoàn thành** (40 test, coverage 98.6%) |
 | 1 | Auth và người dùng: đăng ký, đăng nhập session cookie + CSRF, phân quyền, profile, quên mật khẩu, rate limit, audit | **Hoàn thành**: review đóng Phase 1 kết luận READY TO CLOSE (361 test, coverage 95,05%) |
-| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã duyệt; P2-3 (lưu trữ file + hạn mức 1 GiB/user, migration 0004) đã làm; P2-4 (API upload ảnh PNG/JPEG/WebP, loại metadata, migration 0005) đã nghiệm thu; P2-5 (danh mục model video + `GET /video-models`, chỉ có Mock demo) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
+| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã duyệt; P2-3 (lưu trữ file + hạn mức 1 GiB/user, migration 0004) đã làm; P2-4 (API upload ảnh PNG/JPEG/WebP, loại metadata, migration 0005) đã nghiệm thu; P2-5 (danh mục model video + `GET /video-models`, chỉ có Mock demo) đã nghiệm thu; P2-6 (`POST /videos`, `GET /videos/{id}`, bảng `videos`, migration 0006) và P2-4.1 (lưu ảnh an toàn khi bị hủy / COMMIT không xác định) đã nghiệm thu; P2-7 (worker `python -m app.worker` + MockProvider demo, lease / retry, migration 0007) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
 | 3 | Credit ledger | Chưa bắt đầu |
 | 4 | Tích hợp nhà cung cấp AI video thật (sau khi đã xác minh API và quyền sử dụng) | Chưa bắt đầu |
 | 5 | Thanh toán (cổng thanh toán Việt Nam) | Chưa bắt đầu |
@@ -32,6 +32,7 @@ app/
 │   ├── rate_limit.py    # RateLimiter in-memory, sức chứa riêng từng rule (Redis khi nhiều worker)
 │   ├── errors.py        # AppError + các lớp lỗi + handler trả envelope {"error": {...}}
 │   ├── storage.py       # LocalStorage: khóa do server sinh, chống path traversal/symlink, ghi tmp/ rồi os.replace
+│   ├── background_tasks.py  # P2-7: registry task nền dùng chung + shutdown_background (không dispose khi còn task)
 │   └── time.py          # utc_now()
 ├── modules/             # mỗi miền nghiệp vụ là một module độc lập
 │   ├── health/          # router · schemas · service
@@ -40,19 +41,20 @@ app/
 │   ├── audit/           # nhật ký thao tác nhạy cảm (bảng audit_events)
 │   ├── quota/           # hạn mức dung lượng theo user (bảng user_storage_usage), giữ chỗ nguyên tử
 │   ├── media/           # ảnh đầu vào (bảng media_assets): kiểm tra, mã hóa lại bằng Pillow, phục vụ theo quyền
-│   └── videos/          # P2-5: danh mục model video (catalog.py) + GET /video-models; P2-6 trở đi: tạo video, hàng đợi
+│   └── videos/          # P2-5: danh mục model (catalog.py) + GET /video-models; P2-6: bảng videos, tạo job, đọc chi tiết
 ├── web/                 # các trang HTML tĩnh, mount /static, header bảo mật cho mọi response
 │   ├── router.py        # PAGE_FILES: danh sách trắng đường dẫn → file trang + mount_static_files()
 │   └── security_headers.py  # CSP, nosniff, X-Frame-Options, Referrer-Policy, Permissions-Policy, HSTS
 ├── model_registry.py    # nạp mọi model cho Alembic
 ├── cli.py               # python -m app.cli promote-admin <email> [--yes] | cleanup-auth
+├── worker.py            # P2-7: python -m app.worker — worker tạo video (tiến trình riêng)
 └── server.py            # python -m app.server — cách khởi động chuẩn (tắt proxy headers của uvicorn)
 static/                  # HTML/CSS/JS thuần, không build step, không script/style inline
 ├── index.html · login.html · register.html · forgot-password.html · reset-password.html
 ├── css/                 # tokens.css (biến thiết kế) · base.css · forms.css
 └── js/                  # api.js (điểm duy nhất gọi API) · session.js (header phiên) · authForm.js
                          #   · home.js · loginPage.js · registerPage.js · forgotPasswordPage.js · resetPasswordPage.js
-migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events, 0003 account throttling + trusted devices, 0004 user_storage_usage, 0005 media_assets
+migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events, 0003 account throttling + trusted devices, 0004 user_storage_usage, 0005 media_assets, 0006 videos, 0007 lease + retry của job video
 tests/
 ├── conftest.py · helpers.py
 ├── unit/
@@ -108,6 +110,21 @@ Khi nâng phiên bản SQLAlchemy hoặc mypy thì đổi số phiên bản tron
 - Giao diện web (bản demo): <http://127.0.0.1:8000/>, đăng nhập <http://127.0.0.1:8000/login>, đăng ký `/register`, quên mật khẩu `/forgot-password`, đặt lại mật khẩu `/reset-password` (mở từ link trong email).
 - Health check: <http://127.0.0.1:8000/api/v1/health>
 - Tài liệu API (OpenAPI): <http://127.0.0.1:8000/docs>, **chỉ bật khi `APP_ENV=development`**; `test`, `staging` và `production` trả `404` cho `/docs`, `/redoc`, `/docs/oauth2-redirect` và `/openapi.json`.
+
+### Worker tạo video (P2-7)
+
+```powershell
+.\.venv\Scripts\python.exe -m app.worker                    # chạy liên tục, dừng bằng Ctrl+C / Ctrl+Break
+.\.venv\Scripts\python.exe -m app.worker --exit-when-idle   # xử lý hết hàng đợi rồi thoát (thử nghiệm)
+```
+
+- **Tiến trình riêng**, khởi động / dừng độc lập với web server; hai bên chỉ trao đổi qua bảng `videos` và thư mục storage. Server vẫn chạy khi không có worker (job nằm ở `queued`).
+- Phase 2 chỉ có **MockProvider — bản demo, không phải AI thật**: giả lập tiến độ rồi sao chép file MP4 mẫu ở `MOCK_SAMPLE_VIDEO_PATH` (do chủ dự án cung cấp, không commit). Thiếu file / không phải MP4 (`ftyp` ở byte 4..8) / lớn hơn `VIDEO_OUTPUT_MAX_BYTES` → job `failed` với mã lỗi rõ ràng, không thử lại.
+- **Lease:** job đang xử lý giữ lease 60 giây, heartbeat gia hạn mỗi 10 giây. Worker chết đột ngột (SIGKILL, `TerminateProcess`, mất điện) → lease hết hạn → worker kế tiếp trả job về hàng đợi (có tính lượt thử) hoặc `failed` `processing_timeout` sau 3 lượt. File mồ côi và hạn mức tính thừa do bước đối soát P2-8 xử lý.
+- **Thử lại:** chỉ lỗi tạm thời (DB bị khóa / mất kết nối, timeout, lỗi I/O tạm thời) khi còn lượt; lỗi dữ liệu và lỗi lập trình → `failed` ngay.
+- **Dừng an toàn:** tín hiệu đầu tiên (SIGINT / SIGTERM / SIGBREAK) → ngừng nhận job mới, chờ job đang chạy tối đa `WORKER_SHUTDOWN_GRACE_SECONDS`; quá hạn hoặc tín hiệu thứ hai → hủy job: ở giai đoạn provider thì trả job về hàng đợi **không tính lượt thử**; ở giai đoạn lưu kết quả thì giữ file + hạn mức nếu không xác định được (log "cần đối soát"). Sau đó chờ task dọn dẹp nền; còn task không kết thúc → log critical và **không dispose engine**. Các thời hạn này chỉ giới hạn các bước của worker — tổng thời gian tiến trình kết thúc có thể dài hơn (asyncio còn hủy / chờ task và chờ thread).
+- **Triển khai:** đặt thời hạn dừng của supervisor khoảng **60 giây** (Docker `stop_grace_period`, systemd `TimeoutStopSec`). Quá hạn supervisor gửi SIGKILL → xử lý như worker chết đột ngột (lease + P2-8). Với SQLite nên chạy **một** worker. Trên Windows đặt `PYTHONIOENCODING=utf-8` để log tiếng Việt hiển thị đúng khi ghi ra console / file.
+- Web server khi tắt cũng chờ task dọn dẹp nền (upload ảnh) theo cùng quy tắc; uvicorn hủy request còn treo sau `SERVER_GRACEFUL_SHUTDOWN_SECONDS`.
 
 ### Giao diện web và header bảo mật
 
@@ -227,6 +244,8 @@ Lệnh xóa session và token đặt lại mật khẩu đã hết hạn hoặc 
 | POST | `/api/v1/media/images` | Đăng nhập + CSRF, multipart field `file` | `201` metadata ảnh + `Location`; `409 storage_quota_exceeded`; `413 payload_too_large`; `415 unsupported_media_type` / `animated_image_not_supported`; `422 invalid_image` / `image_dimensions_too_large`; `429` (60/IP/giờ, 30/user/giờ); `503 image_processing_busy` + `Retry-After` |
 | GET | `/api/v1/media/images/{id}` | Đăng nhập (chủ ảnh) | `200` metadata (`id`, `content_type`, `size_bytes`, `width`, `height`, `created_at`); `404` cả khi ảnh của người khác |
 | GET | `/api/v1/media/images/{id}/content` | Đăng nhập (chủ ảnh) | `200` nội dung ảnh đã làm sạch, `Cache-Control: private, no-store`, `Cross-Origin-Resource-Policy: same-origin`; `404` |
+| POST | `/api/v1/videos` | Đăng nhập + CSRF, JSON `{prompt, aspect_ratio, duration_seconds, model_key, input_image_id?}` | `202` video ở `queued` + `Location`; `409 active_video_limit_reached` (đã có 2 job `queued`/`processing`) / `storage_quota_exceeded`; `422 validation_error` / `video_model_unavailable` / `unsupported_video_options` / `input_image_not_supported` / `input_image_not_found`; `429` (60/IP/giờ, 30/user/giờ) |
+| GET | `/api/v1/videos/{id}` | Đăng nhập (chủ video) | `200` trạng thái và thông tin video (không có storage key); `404` cả khi video của người khác |
 | GET | `/api/v1/video-models` | Đăng nhập | `200 {"total", "items"}`: model đang bật theo thứ tự cấu hình, mỗi item có `key`, `display_name`, `is_demo`, `aspect_ratios`, `durations_seconds`, `supports_input_image`; `401` |
 
 Mọi lỗi đều trả theo cùng một định dạng: `{"error": {"code": "...", "message": "...", "details": [...]}}`.
@@ -244,6 +263,10 @@ Mọi lỗi đều trả theo cùng một định dạng: `{"error": {"code": ".
 **Upload ảnh (P2-4):** chỉ nhận PNG, JPEG, WebP, xác định bằng magic bytes (bỏ qua `Content-Type` và tên file của client). Ảnh tối đa `IMAGE_UPLOAD_MAX_BYTES` (10 MiB), JPEG/PNG tối đa 24 MP, WebP tối đa 8 MP; ảnh động bị từ chối. Mọi ảnh được giải mã và mã hóa lại (JPEG/WebP quality 90, PNG lossless): áp hướng xoay EXIF, giữ ICC, loại EXIF/GPS/XMP/text. Hạn mức tính theo byte của file sau xử lý. Tối đa 2 ảnh được xử lý cùng lúc mỗi tiến trình, tối đa 4 request chờ, chờ quá 30 giây trả `503`. File chỉ đọc được qua `/content` sau khi kiểm tra chủ sở hữu, không qua `/static`. Chưa có API xóa ảnh.
 
 **Model video (P2-5):** khả năng của từng model (tỷ lệ 16:9 / 9:16 / 1:1, thời lượng 5 / 10 giây, có nhận ảnh đầu vào) khai báo trong `app/modules/videos/catalog.py`; `ENABLED_VIDEO_MODELS` (mặc định `["mock"]`) chỉ chọn model nào được bật. Phase 2 chỉ có **Mock — bản demo, không phải nhà cung cấp AI thật**, ở mọi môi trường kể cả staging/production (`is_demo: true`). **Key model là định danh bất biến**: được lưu cùng mỗi video, không bao giờ đổi tên hay dùng lại cho model khác; muốn ngừng một model thì bỏ khỏi `ENABLED_VIDEO_MODELS` (model vẫn còn trong danh mục để hiển thị video cũ). Danh sách rỗng, key trùng, sai định dạng hoặc không có trong danh mục → app không khởi động.
+
+**Tạo video (P2-6):** `POST /api/v1/videos` chỉ tạo job ở trạng thái `queued`; Phase 2 chưa có worker (P2-7) nên job chưa được xử lý và **không gọi nhà cung cấp AI nào**. Prompt bỏ khoảng trắng hai đầu, dài 1–1.000 ký tự (code point), không được chứa ký tự điều khiển (trừ xuống dòng và tab); prompt không bao giờ được ghi vào log. Model, tỷ lệ, thời lượng và việc nhận ảnh đầu vào kiểm tra theo `VideoModelSpec`. Ảnh đầu vào không tồn tại, của người khác hoặc đã xóa đều trả cùng `422 input_image_not_found`. Mỗi user tối đa **2 job đang chạy** (`queued` + `processing`), do database bảo đảm (`active_slot` + UNIQUE `uq_videos_owner_id_active_slot`), kể cả khi nhiều request đồng thời. Tạo job **không giữ chỗ dung lượng**: chỉ từ chối sớm khi đã dùng hết hạn mức; worker sẽ giữ chỗ theo kích thước file thật (kế hoạch 4.2). **Chưa có `Idempotency-Key`**: gửi lại cùng một request (mạng chập chờn, bấm hai lần) có thể tạo job trùng — được chặn một phần bởi giới hạn 2 job và rate limit; giao diện P2-10 phải chặn submit hai lần.
+
+**An toàn hạn mức khi lưu ảnh (P2-4.1):** hạn mức CHỈ được hoàn lại khi chắc chắn file không còn trên đĩa và không có bản ghi đã lưu tham chiếu tới nó. Nếu request bị hủy (ví dụ khi tắt server) hoặc COMMIT trả lỗi mà không rõ đã lưu hay chưa, app giữ nguyên file và hạn mức, ghi log khóa tương đối kèm "cần đối soát" (đối soát ở P2-8). COMMIT báo lỗi nhưng bản ghi thực ra đã lưu → trả `201` như bình thường.
 
 Thứ tự xử lý upload: đăng nhập + CSRF → rate limit IP → rate limit user → **rồi mới đọc body multipart**. Request bị từ chối ở các bước đầu không làm server đọc hay ghi tạm byte body nào. Body phải có đúng **một** file ở field `file` và không có field văn bản nào: gửi 2 file hoặc thêm field văn bản trả `400 http_error` (trước khi sửa thứ tự, các request này vẫn được nhận). Thiếu field `file` hoặc body không phải multipart vẫn trả `422 validation_error` (`body.file`) như cũ.
 
