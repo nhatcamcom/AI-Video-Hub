@@ -1,5 +1,6 @@
 """Cấu hình ứng dụng: đọc từ biến môi trường / file .env, kiểm tra ngay khi khởi động."""
 
+import re
 import secrets
 from functools import cache, cached_property, lru_cache
 from pathlib import Path
@@ -29,6 +30,9 @@ MEBIBYTE = 1024 * 1024
 DEFAULT_IMAGE_UPLOAD_MAX_BYTES = 10 * MEBIBYTE  # 10.485.760 byte (P2-4)
 # Ảnh 10 MiB + phần đầu/cuối của multipart; áp cho MỌI request (body JSON hiện tại rất nhỏ)
 DEFAULT_MAX_REQUEST_BODY_BYTES = 11 * MEBIBYTE
+# Định dạng key model video (P2-5), dùng chung với danh mục app/modules/videos/catalog.py
+VIDEO_MODEL_KEY_PATTERN = r"[a-z0-9][a-z0-9-]{0,31}"
+_VIDEO_MODEL_KEY_REGEX = re.compile(VIDEO_MODEL_KEY_PATTERN)
 
 
 @cache
@@ -93,6 +97,11 @@ class Settings(BaseSettings):
     storage_root: str = "storage"
     storage_quota_bytes_per_user: int = Field(default=DEFAULT_STORAGE_QUOTA_BYTES, gt=0)
 
+    # --- Model video (P2-5) ---
+    # Key model đang bật, theo thứ tự hiển thị (JSON, ví dụ ["mock"]). Ở đây chỉ kiểm tra định dạng,
+    # rỗng và trùng; key không có trong danh mục bị create_app từ chối khi khởi động
+    enabled_video_models: list[str] = ["mock"]
+
     # --- Giới hạn kích thước (P2-4) ---
     # Ảnh upload (byte thật đọc được) và ảnh sau khi mã hóa lại đều không được vượt mức này
     image_upload_max_bytes: int = Field(default=DEFAULT_IMAGE_UPLOAD_MAX_BYTES, gt=0)
@@ -119,6 +128,20 @@ class Settings(BaseSettings):
     def validate_trusted_proxies(cls, entries: list[str]) -> list[str]:
         parse_trusted_proxies(entries)  # ném ValueError nếu sai định dạng hoặc là wildcard
         return entries
+
+    @field_validator("enabled_video_models")
+    @classmethod
+    def validate_enabled_video_models(cls, keys: list[str]) -> list[str]:
+        if not keys:
+            raise ValueError("enabled_video_models không được rỗng")
+        malformed = [key for key in keys if not _VIDEO_MODEL_KEY_REGEX.fullmatch(key)]
+        if malformed:
+            raise ValueError(
+                f"enabled_video_models có key sai định dạng (chữ thường, số, '-'): {malformed!r}"
+            )
+        if len(set(keys)) != len(keys):
+            raise ValueError("enabled_video_models có key trùng")
+        return keys
 
     @cached_property
     def trusted_proxy_networks(self) -> tuple[IPNetwork, ...]:

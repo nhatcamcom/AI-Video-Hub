@@ -116,9 +116,13 @@ AI Video Hub/
 │   │   ├── router.py      # PAGE_FILES: danh sách trắng đường dẫn → trang HTML; mount /static (chặn path traversal)
 │   │   └── security_headers.py  # CSP + header bảo mật cho MỌI response; bọc NGOÀI middleware stack
 │   │                      #   (SecureHeadersFastAPI) để cả response 500 cũng có header
-│   └── modules/           # mỗi miền nghiệp vụ một thư mục: health, users, auth, audit, quota (P2-3), media (P2-4)
+│   └── modules/           # mỗi miền nghiệp vụ một thư mục: health, users, auth, audit, quota (P2-3), media (P2-4),
+│       │                  #   videos (P2-5)
 │       ├── media/         # P2-4 · ảnh đầu vào: image_processing.py (Pillow, ImageProcessingGate 2 slot),
 │       │                  #   rate_limits.py (MEDIA_CAPACITY_SHARES), bảng media_assets
+│       ├── videos/        # P2-5 · catalog.py: VideoModelSpec (nguồn DUY NHẤT về khả năng model), KNOWN_VIDEO_MODELS,
+│       │                  #   build_video_model_catalog(ENABLED_VIDEO_MODELS); router GET /video-models. Key model
+│       │                  #   bất biến; Mock là demo, không phải AI thật. Chưa có models.py/service.py (P2-6)
 │       └── <miền>/        # chỉ có file mà miền cần (health không có models.py, audit không có router.py),
 │           │              #   có thể thêm file riêng (vd. auth: cookies.py, dependencies.py, throttle.py)
 │           ├── router.py  # router mỏng: nhận request, gọi service, trả response_model
@@ -153,8 +157,9 @@ Thư mục runtime cục bộ, đã git-ignore và không phải mã nguồn: `.
 app/
 ├── worker.py              # P2-7 · python -m app.worker: entrypoint mỏng (vòng lặp, tín hiệu dừng, log)
 └── modules/
-    └── videos/            # P2-6 · yêu cầu tạo video, hàng đợi (bảng videos), service job cho worker
-        └── providers/     # P2-5/P2-7 · VideoProvider + MockProvider
+    └── videos/            # đã có catalog/router (P2-5); P2-6 thêm models.py/service.py: yêu cầu tạo video,
+        │                  #   hàng đợi (bảng videos), service job cho worker
+        └── providers/     # P2-7 · VideoProvider + MockProvider
 static/*.html, static/js/*.js  # P2-9 trở đi · các trang và module JS theo tính năng (dashboard, create, library…)
 storage/uploads/, storage/videos/  # P2-3 trở đi · file của user, ngoài static/ và mã nguồn, đã git-ignore
 tests/e2e/                 # chỉ khi chủ dự án đồng ý cài Playwright (P2-13)

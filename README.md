@@ -12,7 +12,7 @@ Website **AI Video SaaS**: người dùng mua **credit trả trước** để t�
 |---|---|---|
 | 0 | Nền móng: khung app, config, DB, health, xử lý lỗi, công cụ kiểm tra | **Hoàn thành** (40 test, coverage 98.6%) |
 | 1 | Auth và người dùng: đăng ký, đăng nhập session cookie + CSRF, phân quyền, profile, quên mật khẩu, rate limit, audit | **Hoàn thành**: review đóng Phase 1 kết luận READY TO CLOSE (361 test, coverage 95,05%) |
-| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã duyệt; P2-3 (lưu trữ file + hạn mức 1 GiB/user, migration 0004) đã làm; P2-4 (API upload ảnh PNG/JPEG/WebP, loại metadata, migration 0005) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
+| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã duyệt; P2-3 (lưu trữ file + hạn mức 1 GiB/user, migration 0004) đã làm; P2-4 (API upload ảnh PNG/JPEG/WebP, loại metadata, migration 0005) đã nghiệm thu; P2-5 (danh mục model video + `GET /video-models`, chỉ có Mock demo) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
 | 3 | Credit ledger | Chưa bắt đầu |
 | 4 | Tích hợp nhà cung cấp AI video thật (sau khi đã xác minh API và quyền sử dụng) | Chưa bắt đầu |
 | 5 | Thanh toán (cổng thanh toán Việt Nam) | Chưa bắt đầu |
@@ -39,7 +39,8 @@ app/
 │   ├── auth/            # session, CSRF, Argon2id, reset mật khẩu, dependency phân quyền
 │   ├── audit/           # nhật ký thao tác nhạy cảm (bảng audit_events)
 │   ├── quota/           # hạn mức dung lượng theo user (bảng user_storage_usage), giữ chỗ nguyên tử
-│   └── media/           # ảnh đầu vào (bảng media_assets): kiểm tra, mã hóa lại bằng Pillow, phục vụ theo quyền
+│   ├── media/           # ảnh đầu vào (bảng media_assets): kiểm tra, mã hóa lại bằng Pillow, phục vụ theo quyền
+│   └── videos/          # P2-5: danh mục model video (catalog.py) + GET /video-models; P2-6 trở đi: tạo video, hàng đợi
 ├── web/                 # các trang HTML tĩnh, mount /static, header bảo mật cho mọi response
 │   ├── router.py        # PAGE_FILES: danh sách trắng đường dẫn → file trang + mount_static_files()
 │   └── security_headers.py  # CSP, nosniff, X-Frame-Options, Referrer-Policy, Permissions-Policy, HSTS
@@ -226,6 +227,7 @@ Lệnh xóa session và token đặt lại mật khẩu đã hết hạn hoặc 
 | POST | `/api/v1/media/images` | Đăng nhập + CSRF, multipart field `file` | `201` metadata ảnh + `Location`; `409 storage_quota_exceeded`; `413 payload_too_large`; `415 unsupported_media_type` / `animated_image_not_supported`; `422 invalid_image` / `image_dimensions_too_large`; `429` (60/IP/giờ, 30/user/giờ); `503 image_processing_busy` + `Retry-After` |
 | GET | `/api/v1/media/images/{id}` | Đăng nhập (chủ ảnh) | `200` metadata (`id`, `content_type`, `size_bytes`, `width`, `height`, `created_at`); `404` cả khi ảnh của người khác |
 | GET | `/api/v1/media/images/{id}/content` | Đăng nhập (chủ ảnh) | `200` nội dung ảnh đã làm sạch, `Cache-Control: private, no-store`, `Cross-Origin-Resource-Policy: same-origin`; `404` |
+| GET | `/api/v1/video-models` | Đăng nhập | `200 {"total", "items"}`: model đang bật theo thứ tự cấu hình, mỗi item có `key`, `display_name`, `is_demo`, `aspect_ratios`, `durations_seconds`, `supports_input_image`; `401` |
 
 Mọi lỗi đều trả theo cùng một định dạng: `{"error": {"code": "...", "message": "...", "details": [...]}}`.
 
@@ -240,6 +242,8 @@ Mọi lỗi đều trả theo cùng một định dạng: `{"error": {"code": ".
 **Lưu trữ file người dùng:** `STORAGE_ROOT` (mặc định `storage`, đã git-ignore) chứa `uploads/`, `videos/`, `posters/`, `tmp/`, được tạo khi ghi file đầu tiên. Đường dẫn tương đối tính từ thư mục dự án; app từ chối khởi động nếu `STORAGE_ROOT` nằm trong hoặc bao trùm `static/` hay `app/`. Hạn mức mỗi user là `STORAGE_QUOTA_BYTES_PER_USER` (mặc định 1 GiB = 1.073.741.824 byte), tính theo byte thực ghi xuống đĩa; vượt hạn mức trả `409 storage_quota_exceeded` (dùng từ P2-4). Sau khi cập nhật code, chạy `alembic upgrade head` để tạo bảng `user_storage_usage` và `media_assets`.
 
 **Upload ảnh (P2-4):** chỉ nhận PNG, JPEG, WebP, xác định bằng magic bytes (bỏ qua `Content-Type` và tên file của client). Ảnh tối đa `IMAGE_UPLOAD_MAX_BYTES` (10 MiB), JPEG/PNG tối đa 24 MP, WebP tối đa 8 MP; ảnh động bị từ chối. Mọi ảnh được giải mã và mã hóa lại (JPEG/WebP quality 90, PNG lossless): áp hướng xoay EXIF, giữ ICC, loại EXIF/GPS/XMP/text. Hạn mức tính theo byte của file sau xử lý. Tối đa 2 ảnh được xử lý cùng lúc mỗi tiến trình, tối đa 4 request chờ, chờ quá 30 giây trả `503`. File chỉ đọc được qua `/content` sau khi kiểm tra chủ sở hữu, không qua `/static`. Chưa có API xóa ảnh.
+
+**Model video (P2-5):** khả năng của từng model (tỷ lệ 16:9 / 9:16 / 1:1, thời lượng 5 / 10 giây, có nhận ảnh đầu vào) khai báo trong `app/modules/videos/catalog.py`; `ENABLED_VIDEO_MODELS` (mặc định `["mock"]`) chỉ chọn model nào được bật. Phase 2 chỉ có **Mock — bản demo, không phải nhà cung cấp AI thật**, ở mọi môi trường kể cả staging/production (`is_demo: true`). **Key model là định danh bất biến**: được lưu cùng mỗi video, không bao giờ đổi tên hay dùng lại cho model khác; muốn ngừng một model thì bỏ khỏi `ENABLED_VIDEO_MODELS` (model vẫn còn trong danh mục để hiển thị video cũ). Danh sách rỗng, key trùng, sai định dạng hoặc không có trong danh mục → app không khởi động.
 
 Thứ tự xử lý upload: đăng nhập + CSRF → rate limit IP → rate limit user → **rồi mới đọc body multipart**. Request bị từ chối ở các bước đầu không làm server đọc hay ghi tạm byte body nào. Body phải có đúng **một** file ở field `file` và không có field văn bản nào: gửi 2 file hoặc thêm field văn bản trả `400 http_error` (trước khi sửa thứ tự, các request này vẫn được nhận). Thiếu field `file` hoặc body không phải multipart vẫn trả `422 validation_error` (`body.file`) như cũ.
 

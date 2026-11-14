@@ -28,6 +28,8 @@ from app.modules.media.image_processing import ImageProcessingGate
 from app.modules.media.rate_limits import MEDIA_CAPACITY_SHARES
 from app.modules.media.router import router as media_router
 from app.modules.users.router import router as users_router
+from app.modules.videos.catalog import build_video_model_catalog
+from app.modules.videos.router import router as video_models_router
 from app.web.router import mount_static_files
 from app.web.router import router as web_router
 from app.web.security_headers import SecureHeadersFastAPI, SecurityHeadersPolicy
@@ -61,6 +63,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app_settings = settings or get_settings()
     engine = create_engine(app_settings)
     prepare_password_hashing()  # một lần mỗi tiến trình (có cache)
+    # Key model lạ → dừng ngay khi khởi động, không đợi tới request đầu tiên
+    video_model_catalog = build_video_model_catalog(app_settings.enabled_video_models)
     image_gate = ImageProcessingGate()
 
     @asynccontextmanager
@@ -94,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.email_sender = create_email_sender(app_settings)
     app.state.storage = create_storage(app_settings)
     app.state.image_gate = image_gate
+    app.state.video_model_catalog = video_model_catalog
 
     # Thứ tự: add_middleware sau cùng nằm NGOÀI cùng. Giới hạn body đếm byte thật khi đang nhận;
     # middleware chuẩn hóa phải bọc ngoài nó để đổi 413 text thuần thành envelope JSON
@@ -113,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router, prefix=API_V1_PREFIX)
     app.include_router(users_router, prefix=API_V1_PREFIX)
     app.include_router(media_router, prefix=API_V1_PREFIX)
+    app.include_router(video_models_router, prefix=API_V1_PREFIX)
     app.include_router(web_router)
     mount_static_files(app)
     return app

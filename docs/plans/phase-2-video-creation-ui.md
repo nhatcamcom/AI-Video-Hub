@@ -1,6 +1,6 @@
 # Kế hoạch Phase 2 — Video Creation UI
 
-Trạng thái: **các quyết định ở mục 7 đã được chủ dự án xác nhận (2026-11-14); CLAUDE.md đã đồng bộ về worker; chưa triển khai code.**
+Trạng thái: **các quyết định ở mục 7 đã được chủ dự án xác nhận (2026-11-14). Đã nghiệm thu P2-1, P2-2, P2-3, P2-4; P2-5 đã triển khai, chờ nghiệm thu; P2-6 trở đi chưa triển khai.** Trạng thái chi tiết từng bước ở mục 6.1–6.5. Mục 2 mô tả hiện trạng TRƯỚC khi bắt đầu Phase 2.
 
 ## 1. Mục tiêu và phạm vi
 
@@ -25,7 +25,8 @@ app/
 ├── modules/
 │   ├── media/              # ảnh đầu vào: models, schemas, service, router (upload, xem ảnh của mình)
 │   └── videos/             # yêu cầu tạo video + kết quả: models, schemas, service, router
-│       └── providers/      # VideoProvider (Protocol) + MockProvider + registry model đã cấu hình
+│       ├── catalog.py      # P2-5 · danh mục model đã cấu hình (VideoModelSpec, ENABLED_VIDEO_MODELS)
+│       └── providers/      # P2-7 · VideoProvider (Protocol) + MockProvider
 ├── worker.py               # `python -m app.worker` (quyết định 7.4): entrypoint mỏng — vòng lặp, tín hiệu dừng, log;
 │                           #   logic chiếm job / gọi provider / cập nhật trạng thái nằm trong service của modules/videos/
 static/
@@ -91,7 +92,7 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 | P2-2 | Trang đăng nhập / đăng ký / quên & đặt lại mật khẩu (UI cho API Phase 1) | Xem chi tiết ở 6.2 |
 | P2-3 | `core/storage.py` (LocalStorage) + `storage_root` / hạn mức 1 GB/user (4.1) + `user_storage_usage` + migration 0004 | Xem chi tiết ở 6.3 |
 | P2-4 | Upload ảnh (`POST /media/images`, `GET /media/images/{id}`, `GET /media/images/{id}/content`) + `media_assets` + migration 0005; Pillow 13.0.0 + python-multipart 0.0.33 | Xem chi tiết ở 6.4 |
-| P2-5 | Registry model + `GET /video-models` | Chỉ trả model bật trong cấu hình; Mock gắn nhãn demo; test |
+| P2-5 | Danh mục model (`catalog.py`) + `GET /video-models` | Xem chi tiết ở 6.5 |
 | P2-6 | `videos` + migration 0006 + `POST /videos` | Validate tỷ lệ/thời lượng theo khả năng của model; ảnh đầu vào phải thuộc người tạo; giới hạn job đang chạy mỗi user; `202` + `Location`; hạn mức tạo theo user (dùng lại `AccountThrottle`) |
 | P2-7 | Worker + MockProvider (`python -m app.worker`, tiến trình riêng) | Hai worker không lấy trùng job (test đồng thời); job kẹt ở `processing` khi worker chết được xử lý lại theo thời hạn; chuyển trạng thái đúng; đường dẫn file mẫu cấu hình được, thiếu file mẫu → `failed` + thông báo rõ (test dùng file giả, không cần MP4 thật); lỗi provider → `failed` + `error_code` an toàn; không gọi API AI thật; server chạy được khi không có worker và ngược lại |
 | P2-8 | API đọc: list (cursor), detail, content (Range, download), poster, delete + lệnh cleanup/đối soát lưu trữ | Chỉ chủ sở hữu; cursor ổn định; Range trả `206`; test IDOR; xóa file thành công → `used_bytes` giảm đúng; xóa file thất bại → `used_bytes` không đổi và cleanup xử lý lại được; đối soát sửa được sai lệch |
@@ -181,7 +182,7 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 
 **Tiêu chí nghiệm thu (đã đạt):** khóa do server sinh; path traversal / symlink / kind-đuôi sai bị từ chối; `STORAGE_ROOT` không nằm trong / bao trùm `static/`, `app/`; giữ chỗ đúng hạn mức, vượt 1 byte → `409`; nhiều user độc lập; 20 request đồng thời trên file SQLite thật không vượt 1.073.741.824 byte; hoàn lại không âm; lỗi ghi/đổi chỗ/xóa xử lý đúng; migration `0004` lên/xuống sạch trên DB tạm (`down_revision = 0003`, downgrade chỉ xóa `user_storage_usage`); pytest/ruff/mypy/bandit/pip-audit đạt; `ai_video_hub.db` không đổi.
 
-### 6.4 Chi tiết P2-4 — Upload ảnh (kế hoạch và giới hạn pixel đã duyệt 2026-11-15; đã triển khai, chờ nghiệm thu)
+### 6.4 Chi tiết P2-4 — Upload ảnh (kế hoạch và giới hạn pixel đã duyệt 2026-11-15; đã triển khai và nghiệm thu 2026-11-15)
 
 **Quyết định của chủ dự án:**
 1. Pillow: thử trong venv tạm ngoài dự án trước (kiểm `PIL._imaging` và WebP); bị Smart App Control chặn thì dừng, không tự dùng phương án Python thuần.
@@ -208,6 +209,18 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 - `app/main.py`: `RequestBodyLimitMiddleware` + middleware chuẩn hóa 413, `app.state.storage`, `app.state.image_gate` (đóng trong lifespan), router media, `APP_CAPACITY_SHARES = AUTH_CAPACITY_SHARES + MEDIA_CAPACITY_SHARES` (media: IPv4 6, IPv6 /64 2, /48 2 trên tổng 110).
 - **Thứ tự xử lý upload (sửa khi rà soát trước nghiệm thu, đã duyệt):** nếu endpoint khai báo tham số `File`, FastAPI parse toàn bộ multipart (tới 11 MiB, ghi file tạm khi > 1 MB) TRƯỚC mọi dependency, nên request chưa đăng nhập vẫn làm server đọc và ghi tạm cả body. Endpoint nay nhận `Request`: `CurrentUserDep` (session + CSRF) → rate limit IP → `MediaService.reserve_upload_rate_limit` → `request.form(max_files=1, max_fields=0)`. Request bị từ chối ở các bước đầu: app đọc 0 byte body. Hành vi thay đổi: 2 file hoặc field văn bản thừa → `400 http_error`. Response `422` khi thiếu file và schema OpenAPI multipart giữ nguyên (schema nay viết inline qua `openapi_extra`, không còn component tự sinh `Body_upload_image_...`).
 - Migration `0005` (`down_revision="0004"`): bảng `media_assets`, index `(owner_id, created_at)` (phục vụ cả khóa ngoại), `storage_key` unique, CHECK `content_type`, `size_bytes`, `width`, `height` > 0.
+
+### 6.5 Chi tiết P2-5 — Danh mục model video (đã duyệt 2026-11-15; đã triển khai, chờ nghiệm thu)
+
+**Quyết định của chủ dự án (D1–D10 và 4 điều kiện):**
+- Phạm vi: chỉ danh mục model + `GET /video-models`. `providers/`, `VideoProvider`, `MockProvider` để sang P2-7. Không DB, không migration, không dependency mới.
+- `app/modules/videos/catalog.py`: `AspectRatio` (StrEnum `16:9`, `9:16`, `1:1`), `ALLOWED_DURATIONS_SECONDS = (5, 10)`, `VideoModelSpec` (dataclass frozen, khả năng là tuple) — **nguồn duy nhất** về tỷ lệ, thời lượng, `supports_input_image`; router và config không lặp lại logic này. `KNOWN_VIDEO_MODELS` tách khỏi `VideoModelCatalog` (`enabled()`, `get_enabled()`, `get_known()`); `VideoModelSpec.supports()`.
+- **Key model là định danh bất biến**, không phụ thuộc `display_name`; model đã tắt vẫn tra được bằng `get_known()`.
+- Mock luôn `is_demo=true`, `display_name` ghi rõ không phải AI thật, ở mọi môi trường (kể cả staging/production).
+- `ENABLED_VIDEO_MODELS` (JSON, mặc định `["mock"]`): `Settings` từ chối danh sách rỗng, key trùng, key sai định dạng (`[a-z0-9][a-z0-9-]{0,31}`); `create_app` từ chối key không có trong danh mục (`core` không phụ thuộc miền `videos`). Cả hai đều chạy khi khởi động.
+- `GET /api/v1/video-models`: `CurrentUserDep`; `{"total", "items"}`; chỉ model đang bật, đúng thứ tự cấu hình; đúng 6 trường `key`, `display_name`, `is_demo`, `aspect_ratios`, `durations_seconds`, `supports_input_image`; `401` khi chưa đăng nhập; POST/PATCH/PUT/DELETE → `405`. Không rate limit riêng (dữ liệu tĩnh, không truy vấn DB).
+
+**Dùng ở bước sau:** P2-6 kiểm tra `POST /videos` bằng `get_enabled(key)` + `spec.supports(...)`; P2-8 hiển thị video cũ bằng `get_known(key)`; worker (P2-7) tự dựng danh mục từ `Settings`. Server và worker phải dùng cùng `ENABLED_VIDEO_MODELS` (P2-7 quyết định cách xử lý job của model đã tắt).
 
 ## 7. Quyết định đã được chủ dự án xác nhận (2026-11-14)
 
