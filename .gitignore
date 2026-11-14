@@ -16,8 +16,11 @@ dist/
 # Dữ liệu cục bộ — không bao giờ commit
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.sqlite3
 storage/
+backups/
 
 # Công cụ kiểm tra
 .pytest_cache/

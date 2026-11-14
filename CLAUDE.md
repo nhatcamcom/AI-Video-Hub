@@ -7,11 +7,11 @@ Hướng dẫn bắt buộc cho Claude Code khi làm việc trong dự án này.
 - **Backend:** Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2.x.
 - **Frontend:** HTML, CSS, JavaScript thuần (không React/Next.js).
 - **Database:** SQLite (giai đoạn đầu) → PostgreSQL (giai đoạn mở rộng).
-- **Kiến trúc:** Modular Monolith (FastAPI) + Worker riêng cho job AI (từ giai đoạn 4).
+- **Kiến trúc:** Modular Monolith (FastAPI) + Worker riêng cho job tạo video (từ giai đoạn 2, chạy ở tiến trình riêng `python -m app.worker`).
 - **Sản phẩm:** AI Video SaaS — Text-to-Video, Image-to-Video qua API nhà cung cấp bên ngoài (giai đoạn đầu dùng `MockProvider`; chỉ tích hợp nhà cung cấp thật khi đã xác minh API và quyền sử dụng). Credit trả trước, chi phí tính theo nhà cung cấp và tác vụ. Thanh toán (cổng Việt Nam) làm sau khi credit ổn định.
 - **Trạng thái 2026-11-13:**
   - Giai đoạn 0 (nền móng) đã commit (`8769279`).
-  - Giai đoạn 1 (Auth và người dùng) đã triển khai: session cookie phía server + CSRF, Argon2id, phân quyền USER/ADMIN, profile, quên mật khẩu, rate limit, Alembic migration `0001`–`0002`, audit, cleanup. 250 test pass sau khi khắc phục security review.
+  - Giai đoạn 1 (Auth và người dùng) đã triển khai: session cookie phía server + CSRF, Argon2id, phân quyền USER/ADMIN, profile, quên mật khẩu, rate limit theo IP/mạng (in-memory) và theo tài khoản (database), cookie thiết bị quen, Alembic migration `0001`–`0003`, audit, cleanup. Review đóng Phase 1: **READY TO CLOSE** (361 test, coverage 95,05%). Điều kiện triển khai và rủi ro đã chấp nhận ghi trong `README.md`. PostgreSQL mới kiểm tra DDL offline, chưa chạy trên server thật.
   - Lộ trình và trạng thái từng giai đoạn ghi trong `README.md`.
 - **Quy ước auth (bắt buộc giữ cho endpoint mới):**
   - Endpoint cần đăng nhập dùng `CurrentUserDep`; endpoint chỉ dành cho ADMIN dùng `AdminUserDep`. Hai dependency này đã tự kiểm tra CSRF cho POST/PATCH/PUT/DELETE, nên không tự viết lại logic kiểm tra session hay CSRF.
@@ -23,6 +23,7 @@ Hướng dẫn bắt buộc cho Claude Code khi làm việc trong dự án này.
   - Băm/kiểm tra mật khẩu từ code async chỉ qua `hash_password_async` / `verify_password_async` (thread pool giới hạn RAM Argon2), không gọi `asyncio.to_thread` trực tiếp.
   - Mọi thao tác quản trị nhạy cảm (đổi quyền, sau này là credit) phải ghi `AuditService.record()` **trong cùng transaction** với thay đổi, và không ghi email hay secret vào audit hoặc log.
 - **Chạy server:** luôn dùng `python -m app.server` (tắt `proxy_headers` của uvicorn). Việc tin header proxy chỉ do `TRUSTED_PROXY_IPS` quyết định. Không hướng dẫn chạy `uvicorn` trực tiếp mà thiếu `--no-proxy-headers`.
+- **Chạy worker:** `python -m app.worker`, là **tiến trình riêng**, khởi động và dừng độc lập với web server. Không chạy worker bên trong tiến trình web server (không khởi động trong `lifespan` hay background task của `create_app()`). Server và worker chỉ trao đổi qua database (bảng job) và thư mục lưu trữ; server vẫn chạy được khi không có worker.
 - **Engine database** luôn tạo qua `create_engine()` (app) hoặc `create_migration_engine()` (Alembic). Cả hai bật `hide_parameters=True`, nên lỗi SQL không làm lộ email, hash hay token vào log.
 
 ## Skill dự án `ai-video-hub` (đọc đầu tiên)
@@ -99,13 +100,14 @@ AI Video Hub/
 │   │   ├── database.py    # engine async, session factory, Base, get_db, DbDep
 │   │   ├── dependencies.py# SettingsDep (và get_current_user… ở giai đoạn sau)
 │   │   └── errors.py      # AppError + lớp con + handler + schema ErrorResponse
+│   ├── worker.py          # `python -m app.worker` (từ giai đoạn 2): chỉ là entrypoint mỏng (vòng lặp, tín hiệu dừng, log);
+│   │                      #   nghiệp vụ job nằm trong service của miền (app/modules/videos/)
 │   └── modules/           # mỗi miền nghiệp vụ một thư mục (health, auth, videos, credits…)
 │       └── <miền>/
 │           ├── router.py  # router mỏng: nhận request, gọi service, trả response_model
 │           ├── schemas.py # Pydantic: XxxCreate / XxxUpdate / XxxResponse tách riêng
 │           ├── service.py # nghiệp vụ và transaction
 │           └── models.py  # SQLAlchemy ORM models của miền
-├── worker/                # tiến trình worker job AI (giai đoạn 4)
 ├── static/
 │   ├── css/               # tokens.css (biến CSS), base.css, theo từng trang/khối
 │   ├── js/                # Module ES theo tính năng; api.js gom các lệnh fetch
@@ -125,6 +127,7 @@ AI Video Hub/
 
 - Tổ chức theo tính năng/miền (video, user, auth…), mỗi miền có router, schema, model, service riêng. Module chỉ gọi module khác qua service công khai của nó, không truy cập thẳng vào model của miền khác.
 - App được dựng bằng factory `create_app()` và khởi động qua `python -m app.server`. Không tạo `app` ở mức module, để việc import không đọc cấu hình.
+- Worker theo cùng mẫu với `app/server.py` và `app/cli.py`: `app/worker.py` là module chạy được bằng `python -m app.worker`, giữ mỏng; logic chiếm job, gọi provider, cập nhật trạng thái nằm trong service của miền `videos`. Nếu sau này entrypoint lớn quá một file thì đổi thành package `app/worker/` có `__main__.py`, lệnh chạy giữ nguyên. Không đặt worker ở thư mục gốc dự án.
 - File video người dùng tải lên lưu **ngoài** `static/` và ngoài thư mục mã nguồn (ví dụ `storage/uploads/`, cấu hình qua `config`), và nằm trong `.gitignore`.
 
 ## 4. Quy tắc đặt tên

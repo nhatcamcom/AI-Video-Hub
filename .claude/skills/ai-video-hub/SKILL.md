@@ -548,3 +548,53 @@ Issues to fix: 1. …
 
 - Công cụ chưa cài thì ghi **NOT RUN** kèm lý do.
 - Kiểm tra local pass không có nghĩa là đã chạy đúng trên staging hay production; kiểm tra môi trường đích phải báo cáo riêng. Không truy cập production khi chưa được phép.
+
+### Smoke test Authentication (server thật, Windows PowerShell)
+
+**Bắt buộc dùng DB riêng `smoke_test.db`. Tuyệt đối không chạy smoke test trên `ai_video_hub.db`** (DB dev có dữ liệu thật; smoke test ghi tài khoản, session, bộ đếm). `DATABASE_URL` trong biến môi trường được ưu tiên hơn `.env`, và cả app lẫn Alembic đều đọc nó. Biến chỉ có hiệu lực trong cửa sổ PowerShell đã đặt nó, nên server phải chạy trong chính cửa sổ đó. `*.db` đã bị git ignore.
+
+Quy tắc bảo vệ mật khẩu / token / cookie:
+- Chỉ dùng email `@example.com` và mật khẩu dùng một lần, nhập qua `Read-Host`. Không ghi mật khẩu vào lệnh, script, tài liệu, commit hay báo cáo.
+- Không dùng `curl -v` / `-i` (in cookie và token). Cookie chỉ lưu trong file jar tạm, xóa ngay khi xong.
+- Không in nội dung file trong `storage/dev-outbox/` vào báo cáo (chứa token reset).
+- Mật khẩu hoặc token đã lộ ra transcript/log thì coi như bị lộ: đổi bằng luồng forgot/reset-password.
+
+```powershell
+# Cửa sổ A — DB smoke riêng + server. Dừng ngay nếu DATABASE_URL không trỏ tới smoke_test.db
+$env:PYTHONIOENCODING = "utf-8"    # console cp1258 làm crash `app.server --help` / in tiếng Việt của CLI
+$env:DATABASE_URL = "sqlite+aiosqlite:///./smoke_test.db"
+if ($env:DATABASE_URL -notlike "*smoke_test.db") { throw "DATABASE_URL không phải smoke_test.db" }
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m app.server --port 8765
+
+# Cửa sổ B — gọi API bằng curl.exe (có sẵn trên Windows 10+)
+$base = "http://127.0.0.1:8765/api/v1"
+$jar  = "$env:TEMP\avh-smoke-cookies.txt"
+$reg  = "$env:TEMP\avh-register.json"; $log = "$env:TEMP\avh-login.json"
+$pw   = Read-Host "Mat khau smoke (>= 10 ky tu, dung mot lan)"
+@{ email = "smoke@example.com"; password = $pw; full_name = "Smoke" } | ConvertTo-Json -Compress | Set-Content -Encoding ascii $reg
+@{ email = "smoke@example.com"; password = $pw } | ConvertTo-Json -Compress | Set-Content -Encoding ascii $log   # login cấm field thừa
+
+curl.exe -s -o NUL -w "health   %{http_code}`n" "$base/health"
+curl.exe -s -o NUL -w "register %{http_code}`n" -H "Content-Type: application/json" --data-binary "@$reg" "$base/auth/register"
+curl.exe -s -o NUL -w "login    %{http_code}`n" -c $jar -b $jar -H "Content-Type: application/json" --data-binary "@$log" "$base/auth/login"
+curl.exe -s -o NUL -w "me       %{http_code}`n" -b $jar "$base/auth/me"
+$csrf = ((Select-String -Path $jar -Pattern "avh_csrf").Line -split "`t")[-1]
+curl.exe -s -o NUL -w "logout   %{http_code}`n" -b $jar -c $jar -X POST -H "X-CSRF-Token: $csrf" "$base/auth/logout"
+curl.exe -s -o NUL -w "me-after %{http_code}`n" -b $jar "$base/auth/me"
+
+# Dọn: xóa file chứa mật khẩu/cookie và biến; dừng server (Ctrl+C) ở cửa sổ A rồi xóa DB smoke
+Remove-Item $reg, $log, $jar; Remove-Variable pw, csrf
+Remove-Item .\smoke_test.db
+```
+
+| Bước | Mã kỳ vọng | Mã khác thường gặp |
+|---|---|---|
+| `GET /health` | `200` | `503` khi DB không kết nối được |
+| `POST /auth/register` | `201` | `409` email đã có; `422` dữ liệu sai (mật khẩu < 10 ký tự); `429` |
+| `POST /auth/login` | `200` (đặt `avh_session`, `avh_csrf`, lần đầu thêm `avh_device`) | `401` sai email/mật khẩu; `429` quá 10 lượt/15 phút cho một email |
+| `GET /auth/me` khi đã đăng nhập | `200` | `401` |
+| `POST /auth/logout` có `X-CSRF-Token` | `204` | `403` thiếu/sai CSRF |
+| `GET /auth/me` sau logout | `401` | — |
+
+Hiện **chưa có** lệnh CLI seed, xóa hay hạ quyền tài khoản test: `app.cli` chỉ có `promote-admin` và `cleanup-auth` (`cleanup-auth` dọn session/token/thiết bị hết hạn, **không** xóa tài khoản). Tài khoản test chỉ được dọn bằng cách xóa cả `smoke_test.db`. Không sửa DB bằng tay để xóa hay đổi quyền; nếu cần, bổ sung lệnh CLI có xác nhận và ghi audit (ví dụ `deactivate-user`).

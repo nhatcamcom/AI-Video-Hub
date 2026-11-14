@@ -2,7 +2,7 @@
 
 Website **AI Video SaaS**: người dùng mua **credit trả trước** để tạo video **Text-to-Video** và **Image-to-Video** thông qua API của các nhà cung cấp AI bên ngoài. Hệ thống không tự chạy model trên GPU.
 
-- **Kiến trúc**: Modular Monolith (FastAPI) + Worker riêng cho job AI (worker có từ giai đoạn 4).
+- **Kiến trúc**: Modular Monolith (FastAPI) + Worker riêng cho job tạo video (tiến trình riêng `python -m app.worker`, có từ giai đoạn 2; không chạy trong tiến trình web server).
 - **Stack**: Python 3.12 · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) · SQLite (dev) → PostgreSQL (mở rộng) · HTML/CSS/JS thuần.
 - **Quy chuẩn lập trình**: [CLAUDE.md](CLAUDE.md) và skill [.claude/skills/ai-video-hub/SKILL.md](.claude/skills/ai-video-hub/SKILL.md).
 
@@ -11,10 +11,10 @@ Website **AI Video SaaS**: người dùng mua **credit trả trước** để t�
 | Giai đoạn | Nội dung | Trạng thái |
 |---|---|---|
 | 0 | Nền móng: khung app, config, DB, health, xử lý lỗi, công cụ kiểm tra | **Hoàn thành** (40 test, coverage 98.6%) |
-| 1 | Auth và người dùng: đăng ký, đăng nhập session cookie + CSRF, phân quyền, profile, quên mật khẩu, rate limit, audit | **Hoàn thành**, đã khắc phục security review (250 test) |
-| 2 | Thư viện video và lưu trữ | Chưa bắt đầu |
+| 1 | Auth và người dùng: đăng ký, đăng nhập session cookie + CSRF, phân quyền, profile, quên mật khẩu, rate limit, audit | **Hoàn thành**: review đóng Phase 1 kết luận READY TO CLOSE (361 test, coverage 95,05%) |
+| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang lập kế hoạch**: quyết định đã chốt, chưa triển khai code ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
 | 3 | Credit ledger | Chưa bắt đầu |
-| 4 | Tạo video AI (MockProvider → nhà cung cấp thật) | Chưa bắt đầu |
+| 4 | Tích hợp nhà cung cấp AI video thật (sau khi đã xác minh API và quyền sử dụng) | Chưa bắt đầu |
 | 5 | Thanh toán (cổng thanh toán Việt Nam) | Chưa bắt đầu |
 | 6 | Sẵn sàng production | Chưa bắt đầu |
 
@@ -40,7 +40,7 @@ app/
 ├── model_registry.py    # nạp mọi model cho Alembic
 ├── cli.py               # python -m app.cli promote-admin <email> [--yes] | cleanup-auth
 └── server.py            # python -m app.server — cách khởi động chuẩn (tắt proxy headers của uvicorn)
-migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events
+migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events, 0003 account throttling + trusted devices
 tests/
 ├── conftest.py · helpers.py
 ├── unit/
@@ -115,7 +115,28 @@ App tự xác định IP thật của client (dùng cho rate limit) theo `TRUSTE
 
 ### Staging và production
 
-Với `APP_ENV=staging` hoặc `production`, app **từ chối khởi động** nếu `DEBUG=true`, `COOKIE_SECURE=false`, hoặc `PUBLIC_BASE_URL` không phải `https://`. Riêng production còn cấm `EMAIL_BACKEND=file/memory`. Khi `COOKIE_SECURE=true`, cookie phiên mang tên `__Host-avh_session` (bắt buộc Secure, `Path=/`, không có Domain), nên subdomain không ghi đè được. Cookie CSRF vẫn tên `avh_csrf` ở mọi môi trường để JavaScript đọc được.
+Với `APP_ENV=staging` hoặc `production`, app **từ chối khởi động** nếu `DEBUG=true`, `COOKIE_SECURE=false`, `PUBLIC_BASE_URL` không phải `https://`, `RATE_LIMIT_ENABLED=false`, `EMAIL_BACKEND` là `file`/`memory` (các backend này lưu token reset), hoặc `AUTH_THROTTLE_KEY` thiếu/ngắn hơn 32 ký tự. Khi `COOKIE_SECURE=true`, cookie phiên mang tên `__Host-avh_session` (bắt buộc Secure, `Path=/`, không có Domain), nên subdomain không ghi đè được. Cookie CSRF vẫn tên `avh_csrf` ở mọi môi trường để JavaScript đọc được.
+
+### Điều kiện triển khai (bắt buộc trước staging/production)
+
+1. **`AUTH_THROTTLE_KEY`**: chuỗi ngẫu nhiên ít nhất 32 ký tự (tạo bằng `python -c "import secrets; print(secrets.token_urlsafe(48))"`), **giống nhau ở mọi worker**. Nếu mỗi worker một khóa, bộ đếm theo tài khoản bị chia theo worker. App chỉ kiểm tra độ dài, không kiểm tra độ ngẫu nhiên.
+2. **Giới hạn IP/mạng nằm trong RAM của từng tiến trình**: chỉ đúng khi chạy **một** process. Chạy nhiều worker hoặc nhiều máy thì cần kho đếm chung (Redis hoặc gateway, dự kiến giai đoạn 6). Giới hạn theo tài khoản đã nằm trong database nên dùng chung được.
+3. **Đặt rate limit theo IP ở reverse proxy cho toàn bộ API.** Endpoint cần đăng nhập (vd. `PATCH /users/me`) chưa có rate limit riêng, và trình duyệt có cookie thiết bị quen thì bỏ qua giới hạn IP của `/login`.
+4. **Chạy `python -m app.cli cleanup-auth` định kỳ** (Task Scheduler / cron, ví dụ mỗi giờ).
+5. **PostgreSQL chưa được kiểm thử trên server thật**: migration mới chỉ được kiểm tra bằng DDL offline (`alembic upgrade --sql`). Trước production phải chạy migration và load test luồng đăng nhập trên PostgreSQL thật (lưu ý khả năng deadlock khi dọn bảng `auth_throttles` lúc tải cao; nếu xảy ra, request bị từ chối, không bị bỏ qua giới hạn).
+6. Chạy server bằng `python -m app.server`, đặt `TRUSTED_PROXY_IPS` đúng dải của proxy.
+
+### Rủi ro đã chấp nhận khi đóng Phase 1
+
+Mức LOW/INFO, đã được chủ dự án chấp nhận và chuyển sang các giai đoạn sau:
+
+- Bộ đếm GCRA cho dồn hạn mức rồi hồi dần, nên cửa sổ đầu tiên cho tối đa gần gấp đôi (đo được 199 lượt đăng nhập trong 24 giờ đầu, sau đó khoảng 100 lượt/ngày).
+- Cookie thiết bị quen nếu bị đánh cắp có thể phát lại từ nơi khác: không đăng nhập được nếu thiếu mật khẩu, nhưng được thêm ngân sách dò riêng (khoảng 199 lượt/ngày) và bỏ qua giới hạn IP cho đúng tài khoản đó. Chỉ bị thu hồi khi đặt lại mật khẩu.
+- Kẻ tấn công liên tục vẫn chặn được đăng nhập từ **thiết bị mới** của nạn nhân; thiết bị quen hoặc đặt lại mật khẩu là lối thoát.
+- `register` trả `409` khi email đã tồn tại (lộ email đã đăng ký) — cần luồng xác minh email.
+- `promote-admin` chưa hiển thị trạng thái xác minh email của tài khoản.
+- Khóa `AUTH_THROTTLE_KEY` rỗng ở dev thành khóa HMAC rỗng (production từ chối khóa ngắn).
+- `Retry-After` có thể thấp hơn thực tế; người dùng chung một mạng IPv6 `/48` có thể ảnh hưởng ngân sách của nhau.
 
 ### Migration database (Alembic)
 
@@ -164,7 +185,7 @@ Lệnh xóa session và token đặt lại mật khẩu đã hết hạn hoặc 
 |---|---|---|---|
 | GET | `/api/v1/health` | — | `200` trạng thái app và DB; `503 database_unavailable` |
 | POST | `/api/v1/auth/register` | — | `201` user (role luôn là `user`); `409 email_already_registered`; `422`; `429` |
-| POST | `/api/v1/auth/login` | — | `200` user + đặt cookie `avh_session` (HttpOnly) và `avh_csrf`; `401 invalid_credentials`; `429` |
+| POST | `/api/v1/auth/login` | — | `200` user + đặt cookie `avh_session` (HttpOnly), `avh_csrf` và lần đầu trên trình duyệt đó `avh_device` (HttpOnly, 30 ngày); `401 invalid_credentials`; `429` |
 | POST | `/api/v1/auth/logout` | CSRF nếu đang đăng nhập | `204`, thu hồi phiên phía server và xóa cookie |
 | GET | `/api/v1/auth/me` | Đăng nhập | `200` user; `401` |
 | POST | `/api/v1/auth/forgot-password` | — | `202` cùng một thông báo dù email có tồn tại hay không; `429` |
