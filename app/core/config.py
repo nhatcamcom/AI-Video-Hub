@@ -25,6 +25,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # File người dùng không bao giờ được nằm trong (hoặc bao trùm) mã nguồn và thư mục phục vụ công khai
 STORAGE_FORBIDDEN_DIRS: tuple[Path, ...] = (PROJECT_ROOT / "static", PROJECT_ROOT / "app")
 DEFAULT_STORAGE_QUOTA_BYTES = 1_073_741_824  # 1 GiB/user (quyết định 7.5)
+MEBIBYTE = 1024 * 1024
+DEFAULT_IMAGE_UPLOAD_MAX_BYTES = 10 * MEBIBYTE  # 10.485.760 byte (P2-4)
+# Ảnh 10 MiB + phần đầu/cuối của multipart; áp cho MỌI request (body JSON hiện tại rất nhỏ)
+DEFAULT_MAX_REQUEST_BODY_BYTES = 11 * MEBIBYTE
 
 
 @cache
@@ -88,6 +92,12 @@ class Settings(BaseSettings):
     # file đầu tiên, không phải lúc đọc cấu hình
     storage_root: str = "storage"
     storage_quota_bytes_per_user: int = Field(default=DEFAULT_STORAGE_QUOTA_BYTES, gt=0)
+
+    # --- Giới hạn kích thước (P2-4) ---
+    # Ảnh upload (byte thật đọc được) và ảnh sau khi mã hóa lại đều không được vượt mức này
+    image_upload_max_bytes: int = Field(default=DEFAULT_IMAGE_UPLOAD_MAX_BYTES, gt=0)
+    # Tổng body của MỌI request, đếm khi đang nhận (không tin Content-Length) → 413
+    max_request_body_bytes: int = Field(default=DEFAULT_MAX_REQUEST_BODY_BYTES, gt=0)
 
     # --- Reverse proxy ---
     # Rỗng = không có proxy: X-Forwarded-For bị bỏ qua. Có proxy: chỉ khai báo đúng IP/CIDR của
@@ -172,6 +182,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_unsafe_combinations(self) -> Self:
+        if self.max_request_body_bytes <= self.image_upload_max_bytes:
+            raise ValueError(
+                "max_request_body_bytes phải lớn hơn image_upload_max_bytes "
+                "(còn chỗ cho phần đầu/cuối của multipart)"
+            )
         if self.allow_credentials and WILDCARD_ORIGIN in self.allowed_origins:
             raise ValueError(
                 "allowed_origins không được chứa '*' khi allow_credentials=True "

@@ -12,7 +12,7 @@ Website **AI Video SaaS**: người dùng mua **credit trả trước** để t�
 |---|---|---|
 | 0 | Nền móng: khung app, config, DB, health, xử lý lỗi, công cụ kiểm tra | **Hoàn thành** (40 test, coverage 98.6%) |
 | 1 | Auth và người dùng: đăng ký, đăng nhập session cookie + CSRF, phân quyền, profile, quên mật khẩu, rate limit, audit | **Hoàn thành**: review đóng Phase 1 kết luận READY TO CLOSE (361 test, coverage 95,05%) |
-| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã duyệt; P2-3 (lưu trữ file + hạn mức 1 GiB/user, migration 0004) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
+| 2 | Video Creation UI: giao diện web, upload ảnh, tạo video qua hàng đợi + worker với **MockProvider** (demo, không có AI thật), thư viện video, lưu trữ có hạn mức theo user | **Đang triển khai**: P2-1 (khung web + header bảo mật) đã duyệt; P2-2 (giao diện đăng nhập/đăng ký/quên & đặt lại mật khẩu) đã duyệt; P2-3 (lưu trữ file + hạn mức 1 GiB/user, migration 0004) đã làm; P2-4 (API upload ảnh PNG/JPEG/WebP, loại metadata, migration 0005) đã làm, chờ duyệt ([kế hoạch](docs/plans/phase-2-video-creation-ui.md)) |
 | 3 | Credit ledger | Chưa bắt đầu |
 | 4 | Tích hợp nhà cung cấp AI video thật (sau khi đã xác minh API và quyền sử dụng) | Chưa bắt đầu |
 | 5 | Thanh toán (cổng thanh toán Việt Nam) | Chưa bắt đầu |
@@ -38,7 +38,8 @@ app/
 │   ├── users/           # User, UserRole, hồ sơ, danh sách user (ADMIN)
 │   ├── auth/            # session, CSRF, Argon2id, reset mật khẩu, dependency phân quyền
 │   ├── audit/           # nhật ký thao tác nhạy cảm (bảng audit_events)
-│   └── quota/           # hạn mức dung lượng theo user (bảng user_storage_usage), giữ chỗ nguyên tử
+│   ├── quota/           # hạn mức dung lượng theo user (bảng user_storage_usage), giữ chỗ nguyên tử
+│   └── media/           # ảnh đầu vào (bảng media_assets): kiểm tra, mã hóa lại bằng Pillow, phục vụ theo quyền
 ├── web/                 # các trang HTML tĩnh, mount /static, header bảo mật cho mọi response
 │   ├── router.py        # PAGE_FILES: danh sách trắng đường dẫn → file trang + mount_static_files()
 │   └── security_headers.py  # CSP, nosniff, X-Frame-Options, Referrer-Policy, Permissions-Policy, HSTS
@@ -50,7 +51,7 @@ static/                  # HTML/CSS/JS thuần, không build step, không script
 ├── css/                 # tokens.css (biến thiết kế) · base.css · forms.css
 └── js/                  # api.js (điểm duy nhất gọi API) · session.js (header phiên) · authForm.js
                          #   · home.js · loginPage.js · registerPage.js · forgotPasswordPage.js · resetPasswordPage.js
-migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events, 0003 account throttling + trusted devices, 0004 user_storage_usage
+migrations/              # Alembic (async) — 0001 auth tables, 0002 audit_events, 0003 account throttling + trusted devices, 0004 user_storage_usage, 0005 media_assets
 tests/
 ├── conftest.py · helpers.py
 ├── unit/
@@ -89,6 +90,8 @@ Nếu gặp lỗi `ImportError: DLL load failed ... An Application Control polic
 .\.venv\Scripts\python.exe -m pip download sqlalchemy==2.1.8 mypy==2.4.1 --no-deps --only-binary=:all: --platform any --implementation py --python-version 3.12 --abi none -d .wheels
 .\.venv\Scripts\python.exe -m pip install --force-reinstall --no-deps (Get-ChildItem .wheels\*.whl).FullName
 ```
+
+**Pillow** (P2-4) không có wheel thuần Python; bản ghim `pillow==13.0.0` đã được kiểm tra import và chạy được khi Smart App Control đang bật. Nâng phiên bản Pillow phải kiểm tra lại import `PIL._imaging`, `PIL._webp`, `PIL._imagingcms` trong `.venv`.
 
 Khi nâng phiên bản SQLAlchemy hoặc mypy thì đổi số phiên bản trong lệnh trên cho khớp. Coverage cũng không nạp được tracer C nhưng tự chuyển sang tracer Python, nên pytest sẽ hiện cảnh báo `no-ctracer`. Cảnh báo này vô hại.
 
@@ -147,6 +150,12 @@ Với `APP_ENV=staging` hoặc `production`, app **từ chối khởi động** 
 4. **Chạy `python -m app.cli cleanup-auth` định kỳ** (Task Scheduler / cron, ví dụ mỗi giờ).
 5. **PostgreSQL chưa được kiểm thử trên server thật**: migration mới chỉ được kiểm tra bằng DDL offline (`alembic upgrade --sql`). Trước production phải chạy migration và load test luồng đăng nhập trên PostgreSQL thật (lưu ý khả năng deadlock khi dọn bảng `auth_throttles` lúc tải cao; nếu xảy ra, request bị từ chối, không bị bỏ qua giới hạn).
 6. Chạy server bằng `python -m app.server`, đặt `TRUSTED_PROXY_IPS` đúng dải của proxy.
+7. **Reverse proxy cho upload ảnh (`POST /api/v1/media/images`)** — app đã từ chối request chưa đăng nhập, sai CSRF hoặc vượt rate limit **trước khi đọc body**, nhưng proxy vẫn phải chặn ở tầng mạng:
+   - giới hạn body khoảng `11m` cho đường dẫn upload (vd. nginx `client_max_body_size 11m;`), các đường dẫn khác nhỏ hơn;
+   - giới hạn số request và số kết nối đồng thời theo IP (vd. nginx `limit_req`, `limit_conn`);
+   - timeout khi nhận body (vd. nginx `client_body_timeout`) để chặn client gửi rất chậm giữ kết nối;
+   - lưu ý **proxy buffering**: mặc định nginx nhận hết body (ghi file tạm của proxy khi lớn) rồi mới chuyển cho app, nên áp lực RAM/đĩa tạm chuyển sang proxy và việc app từ chối sớm không còn tiết kiệm băng thông. Theo dõi dung lượng thư mục tạm của proxy, hoặc cân nhắc `proxy_request_buffering off` cho riêng đường dẫn upload.
+8. **Giới hạn xử lý ảnh và rate limit IP là theo từng tiến trình**: cổng xử lý ảnh (2 ảnh cùng lúc, 4 request chờ) và bộ đếm IP nằm trong RAM của mỗi process. Chạy N worker thì RAM xử lý ảnh tối đa và ngân sách IP nhân lên N lần. Rate limit theo user (database) dùng chung mọi worker.
 
 ### Rủi ro đã chấp nhận khi đóng Phase 1
 
@@ -214,6 +223,9 @@ Lệnh xóa session và token đặt lại mật khẩu đã hết hạn hoặc 
 | POST | `/api/v1/auth/reset-password` | — | `200`; `400 invalid_reset_token` (sai, hết hạn hoặc đã dùng); `422`; `429` |
 | PATCH | `/api/v1/users/me` | Đăng nhập + CSRF | `200`; chỉ đổi được `full_name`, gửi field khác như `role`/`email` sẽ bị `422` |
 | GET | `/api/v1/users?skip=&limit=` | ADMIN | `200 {"total", "items"}`; `401`; `403` |
+| POST | `/api/v1/media/images` | Đăng nhập + CSRF, multipart field `file` | `201` metadata ảnh + `Location`; `409 storage_quota_exceeded`; `413 payload_too_large`; `415 unsupported_media_type` / `animated_image_not_supported`; `422 invalid_image` / `image_dimensions_too_large`; `429` (60/IP/giờ, 30/user/giờ); `503 image_processing_busy` + `Retry-After` |
+| GET | `/api/v1/media/images/{id}` | Đăng nhập (chủ ảnh) | `200` metadata (`id`, `content_type`, `size_bytes`, `width`, `height`, `created_at`); `404` cả khi ảnh của người khác |
+| GET | `/api/v1/media/images/{id}/content` | Đăng nhập (chủ ảnh) | `200` nội dung ảnh đã làm sạch, `Cache-Control: private, no-store`, `Cross-Origin-Resource-Policy: same-origin`; `404` |
 
 Mọi lỗi đều trả theo cùng một định dạng: `{"error": {"code": "...", "message": "...", "details": [...]}}`.
 
@@ -225,6 +237,10 @@ Mọi lỗi đều trả theo cùng một định dạng: `{"error": {"code": ".
 
 ### Thử luồng quên mật khẩu khi dev
 
-**Lưu trữ file người dùng:** `STORAGE_ROOT` (mặc định `storage`, đã git-ignore) chứa `uploads/`, `videos/`, `posters/`, `tmp/`, được tạo khi ghi file đầu tiên. Đường dẫn tương đối tính từ thư mục dự án; app từ chối khởi động nếu `STORAGE_ROOT` nằm trong hoặc bao trùm `static/` hay `app/`. Hạn mức mỗi user là `STORAGE_QUOTA_BYTES_PER_USER` (mặc định 1 GiB = 1.073.741.824 byte), tính theo byte thực ghi xuống đĩa; vượt hạn mức trả `409 storage_quota_exceeded` (dùng từ P2-4). Sau khi cập nhật code, chạy `alembic upgrade head` để tạo bảng `user_storage_usage`.
+**Lưu trữ file người dùng:** `STORAGE_ROOT` (mặc định `storage`, đã git-ignore) chứa `uploads/`, `videos/`, `posters/`, `tmp/`, được tạo khi ghi file đầu tiên. Đường dẫn tương đối tính từ thư mục dự án; app từ chối khởi động nếu `STORAGE_ROOT` nằm trong hoặc bao trùm `static/` hay `app/`. Hạn mức mỗi user là `STORAGE_QUOTA_BYTES_PER_USER` (mặc định 1 GiB = 1.073.741.824 byte), tính theo byte thực ghi xuống đĩa; vượt hạn mức trả `409 storage_quota_exceeded` (dùng từ P2-4). Sau khi cập nhật code, chạy `alembic upgrade head` để tạo bảng `user_storage_usage` và `media_assets`.
+
+**Upload ảnh (P2-4):** chỉ nhận PNG, JPEG, WebP, xác định bằng magic bytes (bỏ qua `Content-Type` và tên file của client). Ảnh tối đa `IMAGE_UPLOAD_MAX_BYTES` (10 MiB), JPEG/PNG tối đa 24 MP, WebP tối đa 8 MP; ảnh động bị từ chối. Mọi ảnh được giải mã và mã hóa lại (JPEG/WebP quality 90, PNG lossless): áp hướng xoay EXIF, giữ ICC, loại EXIF/GPS/XMP/text. Hạn mức tính theo byte của file sau xử lý. Tối đa 2 ảnh được xử lý cùng lúc mỗi tiến trình, tối đa 4 request chờ, chờ quá 30 giây trả `503`. File chỉ đọc được qua `/content` sau khi kiểm tra chủ sở hữu, không qua `/static`. Chưa có API xóa ảnh.
+
+Thứ tự xử lý upload: đăng nhập + CSRF → rate limit IP → rate limit user → **rồi mới đọc body multipart**. Request bị từ chối ở các bước đầu không làm server đọc hay ghi tạm byte body nào. Body phải có đúng **một** file ở field `file` và không có field văn bản nào: gửi 2 file hoặc thêm field văn bản trả `400 http_error` (trước khi sửa thứ tự, các request này vẫn được nhận). Thiếu field `file` hoặc body không phải multipart vẫn trả `422 validation_error` (`body.file`) như cũ.
 
 Với `EMAIL_BACKEND=file`, mỗi email được ghi thành một file `.txt` trong `storage/dev-outbox/`. Thư mục này đã nằm trong `.gitignore`. Mở file mới nhất, lấy giá trị sau `#token=` rồi gọi `POST /api/v1/auth/reset-password`. Trên production, backend `file`/`memory` bị cấm và token không bao giờ xuất hiện trong response.

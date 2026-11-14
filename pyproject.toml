@@ -18,6 +18,10 @@ dependencies = [
     "alembic>=1.13",
     "argon2-cffi>=23.1",
     "email-validator>=2.2",
+    # Ghim chính xác (P2-4): Pillow có .pyd biên dịch chưa ký — bản này đã kiểm tra chạy được với
+    # Smart App Control; nâng phiên bản phải kiểm tra lại. python-multipart: cần cho UploadFile
+    "pillow==13.0.0",
+    "python-multipart==0.0.33",
 ]
 
 [project.optional-dependencies]

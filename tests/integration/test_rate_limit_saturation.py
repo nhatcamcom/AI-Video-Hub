@@ -11,14 +11,21 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.core.client_ip import RateLimitSubject
 from app.core.rate_limit import InMemoryRateLimiter, allocate_capacity
-from app.main import create_app
+from app.main import APP_CAPACITY_SHARES, create_app
 from app.modules.auth.rate_limits import (
     AUTH_CAPACITY_SHARES,
     IPV6_NETWORK_BUDGET_MULTIPLIER,
     LOGIN_PER_EMAIL,
     LOGIN_PER_IP,
     RESET_PASSWORD_PER_IP,
+    login_checks,
+)
+from app.modules.media.rate_limits import (
+    MEDIA_CAPACITY_SHARES,
+    MEDIA_UPLOAD_LIMIT,
+    media_upload_checks,
 )
 from tests.conftest import build_settings, create_schema, sqlite_file_url
 from tests.helpers import DEFAULT_EMAIL, login_user, register_user
@@ -38,6 +45,7 @@ async def app(tmp_path: Path) -> AsyncIterator[FastAPI]:
     )
     await create_schema(application)
     yield application
+    application.state.image_gate.close()
     await application.state.engine.dispose()
 
 
@@ -140,13 +148,58 @@ async def test_different_48s_are_not_merged(app: FastAPI) -> None:
         assert await reset_status(other_network) == 400
 
 
-def test_app_reserves_capacity_for_every_auth_rule(app: FastAPI) -> None:
+def test_app_reserves_capacity_for_every_auth_and_media_rule(app: FastAPI) -> None:
     limiter = app.state.rate_limiter
     assert isinstance(limiter, InMemoryRateLimiter)
-    expected = allocate_capacity(MAX_KEYS, AUTH_CAPACITY_SHARES)
+    expected = allocate_capacity(MAX_KEYS, APP_CAPACITY_SHARES)
 
-    assert {rule: limiter.capacity_for(rule) for rule in AUTH_CAPACITY_SHARES} == expected
+    assert set(AUTH_CAPACITY_SHARES).isdisjoint(MEDIA_CAPACITY_SHARES)  # tên rule không trùng
+    assert set(APP_CAPACITY_SHARES) == set(AUTH_CAPACITY_SHARES) | set(MEDIA_CAPACITY_SHARES)
+    assert {rule: limiter.capacity_for(rule) for rule in APP_CAPACITY_SHARES} == expected
+    assert all(capacity >= 1 for capacity in expected.values())
     assert sum(expected.values()) <= MAX_KEYS
+
+
+def test_filling_media_capacity_fails_closed_and_leaves_auth_untouched(app: FastAPI) -> None:
+    limiter = app.state.rate_limiter
+    assert isinstance(limiter, InMemoryRateLimiter)
+    media_capacity = limiter.capacity_for(MEDIA_UPLOAD_LIMIT.ipv4)
+    for index in range(media_capacity):
+        subject = RateLimitSubject.from_client_ip(f"198.51.100.{index + 1}")
+        assert limiter.hit_all(media_upload_checks(subject)) is None
+
+    newcomer = RateLimitSubject.from_client_ip(NEW_CLIENT_IP)
+    assert limiter.hit_all(media_upload_checks(newcomer)) is not None  # IPv4 media: fail-closed
+    assert limiter.hit_all(login_checks(newcomer)) is None  # auth có sức chứa riêng
+
+
+def test_filling_auth_capacity_leaves_media_untouched(app: FastAPI) -> None:
+    limiter = app.state.rate_limiter
+    assert isinstance(limiter, InMemoryRateLimiter)
+    for index in range(limiter.capacity_for(LOGIN_PER_IP)):
+        subject = RateLimitSubject.from_client_ip(f"198.51.100.{index + 1}")
+        assert limiter.hit_all(login_checks(subject)) is None
+
+    newcomer = RateLimitSubject.from_client_ip(NEW_CLIENT_IP)
+    assert limiter.hit_all(login_checks(newcomer)) is not None
+    assert limiter.hit_all(media_upload_checks(newcomer)) is None
+
+
+def test_media_ipv6_network_budget_is_shared_across_64_prefixes(app: FastAPI) -> None:
+    limiter = app.state.rate_limiter
+    assert isinstance(limiter, InMemoryRateLimiter)
+    network_budget = MEDIA_UPLOAD_LIMIT.ipv4.max_requests * IPV6_NETWORK_BUDGET_MULTIPLIER
+    assert MEDIA_UPLOAD_LIMIT.ipv6_network.max_requests == network_budget
+    per_client = MEDIA_UPLOAD_LIMIT.ipv6_client.max_requests
+    for index in range(network_budget // per_client):
+        subject = RateLimitSubject.from_client_ip(f"2001:db8:aa:{index:x}::1")
+        for _ in range(per_client):
+            assert limiter.hit_all(media_upload_checks(subject)) is None
+
+    same_network = RateLimitSubject.from_client_ip("2001:db8:aa:ffff::1")
+    other_network = RateLimitSubject.from_client_ip("2001:db8:bb::1")
+    assert limiter.hit_all(media_upload_checks(same_network)) is not None
+    assert limiter.hit_all(media_upload_checks(other_network)) is None
 
 
 async def test_ipv4_and_ipv4_mapped_clients_keep_per_address_limits(app: FastAPI) -> None:

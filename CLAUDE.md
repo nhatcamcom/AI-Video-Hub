@@ -18,7 +18,7 @@ Hướng dẫn bắt buộc cho Claude Code khi làm việc trong dự án này.
   - Mọi schema request kế thừa `StrictRequest` (`extra="forbid"`).
   - Quyền ADMIN chỉ được cấp qua `python -m app.cli promote-admin`.
   - Endpoint dễ bị lạm dụng phải gọi `enforce_rate_limits(limiter, checks)` một lần cho mọi rule của request, với `checks` dựng từ `RateLimitSubjectDep` (IPv4 theo địa chỉ; IPv6 theo `/64` kèm ngân sách chung cho cả `/48`) qua một `ClientRateLimit`, giống `login_checks` trong `app/modules/auth/rate_limits.py`. Không tự đọc `X-Forwarded-For`.
-  - Rule IP mới phải có tên riêng và được thêm vào `AUTH_CAPACITY_SHARES` (sức chứa riêng). Rule theo IPv4 và `/48` là fail-closed; chỉ `/64` dùng `WhenFull.SKIP` (vì `/48` vẫn chặn).
+  - Rule IP mới phải có tên riêng và sức chứa riêng. Mỗi miền tự khai báo bảng tỉ trọng của mình trong `app/modules/<miền>/rate_limits.py` (auth: `AUTH_CAPACITY_SHARES`, media: `MEDIA_CAPACITY_SHARES`); `app/main.py` gộp tất cả thành `APP_CAPACITY_SHARES`. Thêm rule cho miền khác **không** sửa module auth và không thêm vào `AUTH_CAPACITY_SHARES`. Tỉ trọng là tương đối, không cần giữ tổng 100. Rule theo IPv4 và `/48` là fail-closed; chỉ `/64` dùng `WhenFull.SKIP` (vì `/48` vẫn chặn).
   - Giới hạn theo tài khoản / email (chống dò mật khẩu phân tán, spam email) **không** dùng bộ nhớ in-memory mà dùng `AccountThrottle` (database, khóa HMAC, áp dụng như nhau cho email có tồn tại hay không). Không bao giờ để giới hạn bảo mật tự bỏ qua khi hết chỗ.
   - Băm/kiểm tra mật khẩu từ code async chỉ qua `hash_password_async` / `verify_password_async` (thread pool giới hạn RAM Argon2), không gọi `asyncio.to_thread` trực tiếp.
   - Mọi thao tác quản trị nhạy cảm (đổi quyền, sau này là credit) phải ghi `AuditService.record()` **trong cùng transaction** với thay đổi, và không ghi email hay secret vào audit hoặc log.
@@ -103,8 +103,9 @@ AI Video Hub/
 │   ├── core/              # hạ tầng dùng chung — KHÔNG chứa nghiệp vụ
 │   │   ├── config.py      # Settings (pydantic-settings, đọc .env), get_settings()
 │   │   ├── database.py    # engine async, session factory, Base, get_db, DbDep
-│   │   ├── dependencies.py# SettingsDep, ClientIpDep, RateLimiterDep, EmailSenderDep, RateLimitSubjectDep
-│   │   ├── errors.py      # AppError + lớp con + handler + schema ErrorResponse
+│   │   ├── dependencies.py# SettingsDep, ClientIpDep, RateLimiterDep, EmailSenderDep, RateLimitSubjectDep, StorageDep
+│   │   ├── errors.py      # AppError + lớp con + handler + schema ErrorResponse; P2-4: mọi 413 → envelope
+│   │   │                  #   payload_too_large (PayloadTooLargeEnvelopeMiddleware bọc RequestBodyLimitMiddleware)
 │   │   ├── client_ip.py   # IP thật của client (trusted proxy), khóa rate limit IPv4 / IPv6 /64 + /48
 │   │   ├── rate_limit.py  # rate limiter in-memory, sức chứa riêng từng rule
 │   │   ├── email.py       # adapter EmailSender (file / memory / disabled)
@@ -115,7 +116,9 @@ AI Video Hub/
 │   │   ├── router.py      # PAGE_FILES: danh sách trắng đường dẫn → trang HTML; mount /static (chặn path traversal)
 │   │   └── security_headers.py  # CSP + header bảo mật cho MỌI response; bọc NGOÀI middleware stack
 │   │                      #   (SecureHeadersFastAPI) để cả response 500 cũng có header
-│   └── modules/           # mỗi miền nghiệp vụ một thư mục: health, users, auth, audit, quota (P2-3)
+│   └── modules/           # mỗi miền nghiệp vụ một thư mục: health, users, auth, audit, quota (P2-3), media (P2-4)
+│       ├── media/         # P2-4 · ảnh đầu vào: image_processing.py (Pillow, ImageProcessingGate 2 slot),
+│       │                  #   rate_limits.py (MEDIA_CAPACITY_SHARES), bảng media_assets
 │       └── <miền>/        # chỉ có file mà miền cần (health không có models.py, audit không có router.py),
 │           │              #   có thể thêm file riêng (vd. auth: cookies.py, dependencies.py, throttle.py)
 │           ├── router.py  # router mỏng: nhận request, gọi service, trả response_model
@@ -128,7 +131,7 @@ AI Video Hub/
 │   └── js/                # api.js (điểm DUY NHẤT gọi API, chỉ /api/v1/ cùng origin) · session.js (header phiên)
 │                          #   · authForm.js · home.js · <tên trang>Page.js
 ├── migrations/            # Alembic async (env.py đọc DATABASE_URL từ Settings); alembic.ini CHỈ ASCII
-│   └── versions/          # 0001–0004; mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
+│   └── versions/          # 0001–0005; mỗi thay đổi schema = 1 file; model mới phải thêm vào app/model_registry.py
 ├── tests/
 │   ├── conftest.py · helpers.py
 │   ├── unit/
@@ -150,7 +153,6 @@ Thư mục runtime cục bộ, đã git-ignore và không phải mã nguồn: `.
 app/
 ├── worker.py              # P2-7 · python -m app.worker: entrypoint mỏng (vòng lặp, tín hiệu dừng, log)
 └── modules/
-    ├── media/             # P2-4 · ảnh đầu vào
     └── videos/            # P2-6 · yêu cầu tạo video, hàng đợi (bảng videos), service job cho worker
         └── providers/     # P2-5/P2-7 · VideoProvider + MockProvider
 static/*.html, static/js/*.js  # P2-9 trở đi · các trang và module JS theo tính năng (dashboard, create, library…)

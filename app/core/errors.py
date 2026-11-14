@@ -12,15 +12,21 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
 INTERNAL_ERROR_MESSAGE = "Đã có lỗi xảy ra, vui lòng thử lại sau"
 
+PAYLOAD_TOO_LARGE_CODE = "payload_too_large"
+PAYLOAD_TOO_LARGE_MESSAGE = "Dữ liệu gửi lên vượt quá dung lượng cho phép"
 HTTP_ERROR_CODES: Mapping[int, tuple[str, str]] = {
     404: ("not_found", "Không tìm thấy tài nguyên"),
     405: ("method_not_allowed", "Phương thức không được hỗ trợ"),
+    # 413 từ RequestBodyLimitMiddleware khi body vượt giới hạn trong lúc đang đọc
+    413: (PAYLOAD_TOO_LARGE_CODE, PAYLOAD_TOO_LARGE_MESSAGE),
 }
 
 
@@ -115,6 +121,54 @@ class ServiceUnavailableError(AppError):
     status_code = 503
     code = "service_unavailable"
     default_message = "Dịch vụ tạm thời không khả dụng"
+
+
+class PayloadTooLargeError(AppError):
+    status_code = 413
+    code = PAYLOAD_TOO_LARGE_CODE
+    default_message = PAYLOAD_TOO_LARGE_MESSAGE
+
+
+class PayloadTooLargeEnvelopeMiddleware:
+    """Đổi phản hồi 413 KHÔNG phải JSON thành envelope chuẩn `payload_too_large`.
+
+    `RequestBodyLimitMiddleware` của Starlette tự trả `413` dạng text thuần khi `Content-Length`
+    vượt giới hạn (thay cả phản hồi của app). Middleware này phải đặt NGOÀI nó; mọi phản hồi khác
+    — kể cả 413 đã là JSON — đi qua nguyên vẹn.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        is_replacing = False
+
+        async def send_normalized(message: Message) -> None:
+            nonlocal is_replacing
+            if message["type"] == "http.response.start" and message["status"] == 413:
+                content_type = Headers(raw=message.get("headers", [])).get("content-type", "")
+                if not content_type.startswith("application/json"):
+                    is_replacing = True
+                    envelope = build_error_response(
+                        413, PAYLOAD_TOO_LARGE_CODE, PAYLOAD_TOO_LARGE_MESSAGE
+                    )
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 413,
+                            "headers": envelope.raw_headers,
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": envelope.body})
+                    return
+            if is_replacing:
+                return  # bỏ phần thân text thuần của phản hồi gốc
+            await send(message)
+
+        await self.app(scope, receive, send_normalized)
 
 
 # --------------------------------------------------------------------------- handler

@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.core.email import EmailSender
 from app.core.errors import RateLimitError
 from app.core.rate_limit import RateLimitCheck, RateLimiter
+from app.core.storage import LocalStorage
 
 FORWARDED_FOR_HEADER = "x-forwarded-for"
 
@@ -31,6 +32,11 @@ def get_rate_limiter(request: Request) -> RateLimiter:
 def get_email_sender(request: Request) -> EmailSender:
     sender: EmailSender = request.app.state.email_sender
     return sender
+
+
+def get_storage(request: Request) -> LocalStorage:
+    storage: LocalStorage = request.app.state.storage
+    return storage
 
 
 def get_client_ip(request: Request, settings: SettingsDep) -> str:
@@ -55,6 +61,7 @@ def get_rate_limit_subject(client_ip: ClientIpDep) -> RateLimitSubject:
 
 RateLimiterDep = Annotated[RateLimiter, Depends(get_rate_limiter)]
 EmailSenderDep = Annotated[EmailSender, Depends(get_email_sender)]
+StorageDep = Annotated[LocalStorage, Depends(get_storage)]
 RateLimitSubjectDep = Annotated[RateLimitSubject, Depends(get_rate_limit_subject)]
 
 

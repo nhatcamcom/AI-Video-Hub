@@ -42,7 +42,7 @@ storage/                    # đã git-ignore: uploads/, videos/, posters/
 
 ## 4. Mô hình dữ liệu (migration mới, không sửa 0001–0004)
 
-**`media_assets`** (migration 0005, P2-4): `id`, `owner_id` FK users ON DELETE CASCADE (index), `storage_key` (unique, do server sinh), `content_type` (CHECK trong whitelist), `size_bytes` (số byte **thực ghi xuống đĩa**, tức là sau khi đã loại bỏ metadata), `width`, `height` (nullable — điền khi cách xử lý ảnh chọn ở P2-4 đọc được kích thước), `sha256`, `created_at`, `deleted_at` (nullable). Index `(owner_id, created_at)`.
+**`media_assets`** (migration 0005, P2-4): `id`, `owner_id` FK users ON DELETE CASCADE (index), `storage_key` (unique, do server sinh), `content_type` (CHECK trong whitelist), `size_bytes` (số byte **thực ghi xuống đĩa**, tức là sau khi đã loại bỏ metadata), `width`, `height` (NOT NULL, CHECK > 0 — quyết định 6.4.8), `sha256`, `created_at`, `deleted_at` (nullable). Index `(owner_id, created_at)`.
 
 **`user_storage_usage`** (migration 0004, đã làm ở P2-3): `user_id` PK + FK users ON DELETE CASCADE, `used_bytes` BigInteger NOT NULL default 0 (CHECK `used_bytes >= 0`), `updated_at`. Một hàng mỗi user, là nguồn duy nhất để kiểm tra hạn mức (xem 4.1).
 
@@ -69,7 +69,8 @@ storage/                    # đã git-ignore: uploads/, videos/, posters/
 |---|---|---|
 | GET | `/video-models` | Danh sách model đã cấu hình (Phase 2: chỉ `mock`, gắn nhãn demo) kèm tỷ lệ và thời lượng hỗ trợ |
 | POST | `/media/images` | Multipart upload ảnh → `201` + `Location`; `413` quá 10 MB (đếm byte thật khi đọc); `415` sai định dạng (xác định bằng magic bytes; không tin `content_type` hay tên/đuôi file client gửi); `409 storage_quota_exceeded`; `429` |
-| GET | `/media/images/{id}` | Ảnh của chính mình; của người khác → `404` (không lộ tồn tại) |
+| GET | `/media/images/{id}` | Metadata ảnh của chính mình (JSON, không có `storage_key`); của người khác → `404` (không lộ tồn tại) |
+| GET | `/media/images/{id}/content` | Nội dung ảnh (content type đã lưu, `nosniff`, `Cache-Control: private, no-store`); của người khác → `404` |
 | POST | `/videos` | JSON `{prompt, aspect_ratio, duration_seconds, model_key, input_image_id?}` → `202` + `Location`; `422` khi tổ hợp không được model hỗ trợ; `409` khi vượt số job đang chạy cho phép; `429` |
 | GET | `/videos?cursor=&limit=&status=` | Thư viện của mình, cursor pagination, `limit ≤ 50` |
 | GET | `/videos/{id}` | Trạng thái, tiến độ, metadata |
@@ -89,7 +90,7 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 | P2-1 | Khung web: phục vụ `static/`, layout chung, `tokens.css`, `api.js`, middleware header bảo mật | Xem chi tiết ở 6.1 |
 | P2-2 | Trang đăng nhập / đăng ký / quên & đặt lại mật khẩu (UI cho API Phase 1) | Xem chi tiết ở 6.2 |
 | P2-3 | `core/storage.py` (LocalStorage) + `storage_root` / hạn mức 1 GB/user (4.1) + `user_storage_usage` + migration 0004 | Xem chi tiết ở 6.3 |
-| P2-4 | Upload ảnh + `media_assets` + migration 0005 (giới hạn ảnh 10 MiB = 10.485.760 byte); dùng `LocalStorage` và `StorageQuotaService` của P2-3; cài `python-multipart`; **xem xét Pillow** để loại bỏ metadata (7.8) — mọi dependency kiểm tra tương thích trước khi cài | Định dạng xác định **chỉ bằng magic bytes** (whitelist PNG/JPEG/WebP); `content_type` và tên/đuôi file client gửi bị bỏ qua (test: file PNG gửi kèm `content_type=image/jpeg` và tên `x.exe` vẫn được lưu là PNG; file HTML gửi kèm `content_type=image/png` → 415); tên file và đuôi do server đặt theo định dạng đã xác định; phục vụ lại bằng content type đã lưu + `nosniff`; đếm byte thật, dừng ở 10 MB; 409/413/415/429; không tin kích thước client khai báo; **file lưu lâu dài không còn EXIF/GPS** (test bằng ảnh mẫu có EXIF/GPS cho cả JPEG, PNG, WebP); ảnh người khác → 404; migration up/down sạch |
+| P2-4 | Upload ảnh (`POST /media/images`, `GET /media/images/{id}`, `GET /media/images/{id}/content`) + `media_assets` + migration 0005; Pillow 13.0.0 + python-multipart 0.0.33 | Xem chi tiết ở 6.4 |
 | P2-5 | Registry model + `GET /video-models` | Chỉ trả model bật trong cấu hình; Mock gắn nhãn demo; test |
 | P2-6 | `videos` + migration 0006 + `POST /videos` | Validate tỷ lệ/thời lượng theo khả năng của model; ảnh đầu vào phải thuộc người tạo; giới hạn job đang chạy mỗi user; `202` + `Location`; hạn mức tạo theo user (dùng lại `AccountThrottle`) |
 | P2-7 | Worker + MockProvider (`python -m app.worker`, tiến trình riêng) | Hai worker không lấy trùng job (test đồng thời); job kẹt ở `processing` khi worker chết được xử lý lại theo thời hạn; chuyển trạng thái đúng; đường dẫn file mẫu cấu hình được, thiếu file mẫu → `failed` + thông báo rõ (test dùng file giả, không cần MP4 thật); lỗi provider → `failed` + `error_code` an toàn; không gọi API AI thật; server chạy được khi không có worker và ngược lại |
@@ -180,6 +181,34 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 
 **Tiêu chí nghiệm thu (đã đạt):** khóa do server sinh; path traversal / symlink / kind-đuôi sai bị từ chối; `STORAGE_ROOT` không nằm trong / bao trùm `static/`, `app/`; giữ chỗ đúng hạn mức, vượt 1 byte → `409`; nhiều user độc lập; 20 request đồng thời trên file SQLite thật không vượt 1.073.741.824 byte; hoàn lại không âm; lỗi ghi/đổi chỗ/xóa xử lý đúng; migration `0004` lên/xuống sạch trên DB tạm (`down_revision = 0003`, downgrade chỉ xóa `user_storage_usage`); pytest/ruff/mypy/bandit/pip-audit đạt; `ai_video_hub.db` không đổi.
 
+### 6.4 Chi tiết P2-4 — Upload ảnh (kế hoạch và giới hạn pixel đã duyệt 2026-11-15; đã triển khai, chờ nghiệm thu)
+
+**Quyết định của chủ dự án:**
+1. Pillow: thử trong venv tạm ngoài dự án trước (kiểm `PIL._imaging` và WebP); bị Smart App Control chặn thì dừng, không tự dùng phương án Python thuần.
+2. Nhận file bằng `UploadFile` của FastAPI; chấp nhận file tạm của Starlette trong `%TEMP%`, bảo đảm đóng và dọn khi request kết thúc.
+3. Giới hạn body toàn app khoảng 11 MiB (gồm overhead multipart) bằng `RequestBodyLimitMiddleware` của Starlette. Được duyệt thêm một middleware nhỏ (`PayloadTooLargeEnvelopeMiddleware`) để MỌI `413` trả envelope JSON `payload_too_large` và giữ header bảo mật; không đổi cách xử lý các mã lỗi khác.
+4. Mã hóa lại: JPEG/WebP quality 90, PNG lossless; giữ ICC; loại EXIF, GPS, XMP, text metadata; áp hướng xoay trước khi lưu; từ chối ảnh động; ảnh sau xử lý tối đa 10 MiB (10.485.760 byte).
+5. Giới hạn pixel (đã duyệt): JPEG/PNG ≤ 24 MP, WebP ≤ 8 MP, kiểm tra từ header trước khi giải mã và trước khi xin slot; giữ `Image.MAX_IMAGE_PIXELS` làm lớp bảo vệ thêm. Tối đa 2 ảnh xử lý đồng thời (thread pool riêng 2 worker), tối đa 4 request chờ, chờ quá 30 giây → `503 image_processing_busy` kèm `Retry-After`; request đang chờ không giải mã, không giữ cả file trong RAM.
+6. API: `POST /media/images`, `GET /media/images/{id}` (metadata), `GET /media/images/{id}/content` (nội dung).
+7. Rate limit: 60 lượt/IP/giờ, 30 lượt/user/giờ; rule media thêm vào phân bổ sức chứa chung (gộp ở `app/main.py`), không sửa module auth; kiểm thử cả rule media và rule auth hiện có.
+8. `width`, `height` NOT NULL.
+9. Được sửa `app/core/config.py`, `app/core/errors.py`, `app/core/dependencies.py`, `app/main.py`; không sửa auth/users/audit/health.
+10. Chưa có API xóa ảnh trong P2-4.
+
+**Kết quả kiểm tra trước khi triển khai (2026-11-15, venv tạm trong scratchpad, `.venv` dự án không đổi):**
+- **Pillow 13.0.0** (`cp312-win_amd64`): `PIL._imaging`, `PIL._webp`, `PIL._imagingcms` import được dù Smart App Control đang bật và 8 file `.pyd` không có chữ ký số; hỗ trợ WebP, JPEG, zlib, littlecms2 (ICC). Mã hóa lại JPEG/PNG/WebP (có EXIF + GPS + XMP + text + ICC) → kiểm tra theo cấu trúc file: không còn APP1(Exif/XMP)/COM (JPEG), `eXIf`/`tEXt`/`iTXt` (PNG), `EXIF`/`XMP` (WebP); ICC được giữ; hướng xoay đúng; ảnh động WebP/PNG bị phát hiện; decompression bomb bị chặn ngay khi `open()`.
+- **python-multipart 0.0.33**: wheel thuần Python (`py3-none-any`). pip-audit: Pillow 13.0.0 và python-multipart 0.0.33 không có lỗ hổng đã biết.
+- **Starlette 1.10.0 / FastAPI 0.162.5**: FastAPI KHÔNG chuyển tham số `max_body_size` của Starlette, nên phải `add_middleware(RequestBodyLimitMiddleware, ...)`. Hoạt động đúng với body gửi theo luồng không có `Content-Length` và với `Content-Length` khai sai (đếm byte thật); `413` không bị FastAPI đổi thành `400`; file tạm của Starlette (đã chuyển xuống đĩa khi > 1 MB) được đóng và xóa sau request, kể cả khi `413`. Hai điểm lệch envelope: `Content-Length` vượt giới hạn → middleware tự trả `413` dạng text thuần trước khi vào app; khi vượt giữa chừng → envelope JSON nhưng `code="http_error"` (sửa được bằng ánh xạ 413 trong `app/core/errors.py`).
+- **RAM đo thật** (đỉnh private bytes, ảnh nhiễu là trường hợp xấu cho bộ mã hóa, 8–40 MP): JPEG ~8,2 byte/pixel và PNG ~8,2 byte/pixel khi phải xoay (2 ảnh 4 byte/pixel cùng tồn tại; không xoay: JPEG ~5,6, PNG ~7,1); **WebP ~34,4 byte/pixel** (giải mã ~16, mã hóa lại ~34), không phụ thuộc xoay. Giải phóng ảnh gốc ngay sau khi xoay giảm đỉnh 15–25%.
+
+**Đã triển khai (2026-11-15):**
+- `app/modules/media/`: `image_processing.py` (magic bytes → đọc header → giải mã + mã hóa lại trong `ImageProcessingGate`), `service.py` (luồng upload và hoàn tác), `router.py` (3 endpoint), `rate_limits.py`, `models.py` (`MediaAsset`), `schemas.py` (`MediaImageResponse` không có `storage_key`/`sha256`), `errors.py`.
+- Thứ tự upload: rate limit IP (in-memory) → rate limit user (database) → ghi `tmp/` đếm byte thật → magic bytes + header → gate → ghi bản đã làm sạch vào `tmp/` → giữ chỗ hạn mức → `os.replace` sang `uploads/` → INSERT. Đổi chỗ lỗi: hoàn hạn mức, xóa file tạm. INSERT lỗi: xóa file, chỉ hoàn hạn mức khi xóa được (không xóa được thì giữ hạn mức, log `cần đối soát`). File tạm luôn bị xóa.
+- `app/core/config.py`: `IMAGE_UPLOAD_MAX_BYTES` (10 MiB), `MAX_REQUEST_BODY_BYTES` (11 MiB, phải lớn hơn giới hạn ảnh). `app/core/errors.py`: `PayloadTooLargeError`, ánh xạ 413, `PayloadTooLargeEnvelopeMiddleware`. `app/core/dependencies.py`: `StorageDep`.
+- `app/main.py`: `RequestBodyLimitMiddleware` + middleware chuẩn hóa 413, `app.state.storage`, `app.state.image_gate` (đóng trong lifespan), router media, `APP_CAPACITY_SHARES = AUTH_CAPACITY_SHARES + MEDIA_CAPACITY_SHARES` (media: IPv4 6, IPv6 /64 2, /48 2 trên tổng 110).
+- **Thứ tự xử lý upload (sửa khi rà soát trước nghiệm thu, đã duyệt):** nếu endpoint khai báo tham số `File`, FastAPI parse toàn bộ multipart (tới 11 MiB, ghi file tạm khi > 1 MB) TRƯỚC mọi dependency, nên request chưa đăng nhập vẫn làm server đọc và ghi tạm cả body. Endpoint nay nhận `Request`: `CurrentUserDep` (session + CSRF) → rate limit IP → `MediaService.reserve_upload_rate_limit` → `request.form(max_files=1, max_fields=0)`. Request bị từ chối ở các bước đầu: app đọc 0 byte body. Hành vi thay đổi: 2 file hoặc field văn bản thừa → `400 http_error`. Response `422` khi thiếu file và schema OpenAPI multipart giữ nguyên (schema nay viết inline qua `openapi_extra`, không còn component tự sinh `Body_upload_image_...`).
+- Migration `0005` (`down_revision="0004"`): bảng `media_assets`, index `(owner_id, created_at)` (phục vụ cả khóa ngoại), `storage_key` unique, CHECK `content_type`, `size_bytes`, `width`, `height` > 0.
+
 ## 7. Quyết định đã được chủ dự án xác nhận (2026-11-14)
 
 1. **Lộ trình:** Phase 2 là **Video Creation UI**, gồm thư viện video, giao diện tạo video và MockProvider. Phase 4 chỉ tập trung tích hợp các nhà cung cấp AI video thực tế. README đã cập nhật theo lộ trình này.
@@ -205,5 +234,6 @@ Mỗi task: TDD (RED → GREEN), ruff, mypy strict, pytest (coverage ≥ 80%, ph
 - **Worker chết giữa chừng:** job kẹt ở `processing` → cần thời hạn xử lý (lease) và cơ chế đưa lại hàng đợi hoặc đánh dấu `failed`; worker dừng an toàn khi nhận tín hiệu dừng; log không chứa prompt hay dữ liệu cá nhân.
 - **Hạn mức lưu trữ:** sai lệch `used_bytes` nếu tiến trình chết giữa lúc giữ chỗ và ghi file, hoặc giữa lúc xóa file và cập nhật DB → cần bước đối soát định kỳ; file tạm của upload dở dang phải được dọn. Xóa file thất bại kéo dài (file bị khóa trên Windows, quyền thư mục) làm user bị tính dung lượng cho video đã xóa cho tới khi cleanup thành công — cần log cảnh báo (không ghi đường dẫn tuyệt đối hay dữ liệu cá nhân).
 - **Đĩa đầy toàn hệ thống** không được hạn mức theo user bảo vệ (nhiều user × 1 GB): cần theo dõi dung lượng đĩa khi triển khai thật.
-- **Rule rate limit IP mới** cho upload/tạo video phải có tên riêng và được thêm vào `AUTH_CAPACITY_SHARES` (quy ước CLAUDE.md); hiện tổng tỉ trọng đã là 100, nên cần chia lại.
+- **Upload của user ĐÃ đăng nhập vẫn tốn tài nguyên:** mỗi request hợp lệ được đọc tới 11 MiB (ghi file tạm của Starlette khi > 1 MB), giới hạn bởi 30 lượt/user/giờ và 60 lượt/IP/giờ nhưng chưa giới hạn số upload đồng thời mỗi user. Cổng xử lý ảnh và rate limit IP là theo từng tiến trình. Điều kiện reverse proxy ghi ở README (Điều kiện triển khai, mục 7–8).
+- **Rule rate limit IP mới** cho upload/tạo video phải có tên riêng và sức chứa riêng. Từ P2-4, rule của từng miền nằm trong bảng tỉ trọng riêng (`MEDIA_CAPACITY_SHARES`…) và được gộp vào `APP_CAPACITY_SHARES` ở `app/main.py`; tỉ trọng là tương đối nên không cần chia lại tổng 100 của auth.
 - **CSP và Swagger UI:** `/docs` cần script ngoài và inline; ngoại lệ chỉ áp dụng cho đúng `/docs`, `/redoc`, `/docs/oauth2-redirect` khi `APP_ENV=development`, không được nới CSP cho toàn app. Trang docs phụ thuộc CDN bên ngoài (jsdelivr, Google Fonts) nên cần internet khi xem.

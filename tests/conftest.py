@@ -66,8 +66,11 @@ async def create_schema(app: FastAPI) -> None:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    # File SQLite riêng cho mỗi test: mọi kết nối trong test thấy cùng một DB
-    return build_settings(database_url=sqlite_file_url(tmp_path))
+    # File SQLite riêng cho mỗi test: mọi kết nối trong test thấy cùng một DB.
+    # Thư mục lưu trữ cũng riêng cho mỗi test: test KHÔNG BAO GIỜ ghi vào storage/ thật của dự án
+    return build_settings(
+        database_url=sqlite_file_url(tmp_path), storage_root=str(tmp_path / "storage")
+    )
 
 
 @pytest.fixture
@@ -75,6 +78,7 @@ async def app(settings: Settings) -> AsyncIterator[FastAPI]:
     application = create_app(settings)
     await create_schema(application)
     yield application
+    application.state.image_gate.close()  # ASGITransport không chạy lifespan
     await application.state.engine.dispose()
 
 

@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MAIN_DATABASE = PROJECT_ROOT / "ai_video_hub.db"
 AUTH_TABLES = {"users", "user_sessions", "password_reset_tokens"}
 QUOTA_TABLE = "user_storage_usage"
+MEDIA_TABLE = "media_assets"
 
 
 def verify_temporary_database(database_path: Path) -> Path:
@@ -104,14 +105,23 @@ def test_migration_runs_on_the_given_temporary_database(tmp_path: Path) -> None:
     assert QUOTA_TABLE in table_names(database_path)
 
 
-def test_revision_0004_follows_0003_and_is_head() -> None:
+def test_revision_0004_follows_0003() -> None:
     scripts = ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
 
     revision = scripts.get_revision("0004")
 
     assert revision is not None
     assert revision.down_revision == "0003"
-    assert scripts.get_current_head() == "0004"
+
+
+def test_revision_0005_follows_0004_and_is_head() -> None:
+    scripts = ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
+
+    revision = scripts.get_revision("0005")
+
+    assert revision is not None
+    assert revision.down_revision == "0004"
+    assert scripts.get_current_head() == "0005"
 
 
 def test_upgrade_creates_storage_usage_table_with_constraints(tmp_path: Path) -> None:
@@ -144,7 +154,7 @@ def test_downgrade_to_0003_removes_only_the_storage_usage_table(tmp_path: Path) 
     command.downgrade(config, "0003")
 
     after = table_names(database_path)
-    assert before - after == {QUOTA_TABLE}
+    assert before - after == {QUOTA_TABLE, MEDIA_TABLE}  # 0005 phụ thuộc 0004 nên cũng bị gỡ
     assert after >= AUTH_TABLES | {"audit_events", "auth_throttles", "trusted_devices"}
 
 
@@ -167,3 +177,63 @@ def test_downgrade_removes_auth_tables(tmp_path: Path) -> None:
     command.downgrade(config, "base")
 
     assert AUTH_TABLES.isdisjoint(table_names(database_path))
+
+
+def test_upgrade_creates_media_assets_table_with_constraints(tmp_path: Path) -> None:
+    database_path = tmp_path / "migrate.db"
+    command.upgrade(alembic_config(database_path), "head")
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        inspector = inspect(engine)
+        columns = {column["name"]: column for column in inspector.get_columns(MEDIA_TABLE)}
+        foreign_keys = inspector.get_foreign_keys(MEDIA_TABLE)
+        checks = {check["name"] for check in inspector.get_check_constraints(MEDIA_TABLE)}
+        uniques = inspector.get_unique_constraints(MEDIA_TABLE)
+        indexes = {
+            index["name"]: index["column_names"] for index in inspector.get_indexes(MEDIA_TABLE)
+        }
+    finally:
+        engine.dispose()
+
+    assert set(columns) == {
+        "id", "owner_id", "storage_key", "content_type", "size_bytes",
+        "width", "height", "sha256", "created_at", "deleted_at",
+    }  # fmt: skip
+    nullable = {name for name, column in columns.items() if column["nullable"]}
+    assert nullable == {"deleted_at"}  # width/height NOT NULL
+    assert foreign_keys[0]["referred_table"] == "users"
+    assert foreign_keys[0]["constrained_columns"] == ["owner_id"]
+    assert foreign_keys[0]["options"].get("ondelete") == "CASCADE"
+    assert checks == {
+        "ck_media_assets_content_type_allowed",
+        "ck_media_assets_size_bytes_positive",
+        "ck_media_assets_width_positive",
+        "ck_media_assets_height_positive",
+    }
+    assert [unique["column_names"] for unique in uniques] == [["storage_key"]]
+    assert indexes == {"ix_media_assets_owner_id_created_at": ["owner_id", "created_at"]}
+
+
+def test_downgrade_to_0004_removes_only_the_media_assets_table(tmp_path: Path) -> None:
+    database_path = tmp_path / "migrate.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "head")
+    before = table_names(database_path)
+
+    command.downgrade(config, "0004")
+
+    after = table_names(database_path)
+    assert before - after == {MEDIA_TABLE}
+    assert QUOTA_TABLE in after
+
+
+def test_upgrade_after_downgrade_recreates_media_assets_table(tmp_path: Path) -> None:
+    database_path = tmp_path / "migrate.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "head")
+    command.downgrade(config, "0004")
+
+    command.upgrade(config, "head")
+
+    assert MEDIA_TABLE in table_names(database_path)
